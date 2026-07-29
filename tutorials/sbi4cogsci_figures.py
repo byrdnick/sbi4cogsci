@@ -1,11 +1,9 @@
 """Figures for the hierarchical-modelling material (Day 3, 11:00).
 
-Written once, used three ways:
+Written once, used two ways:
 
 1. imported by `day3_sbi_tools/_src/hierarchical-mcmc.py` (the notebook),
-2. baked to PNG for `hierarchical-mcmc-slides.qmd` by
-   `day3_sbi_tools/_src/bake_slide_figures.py`,
-3. ready for marimo — see the shape rule below.
+2. ready for marimo — see the shape rule below.
 
 **The shape rule.** Expensive *computation* and cheap *plotting* are separate
 functions. A `fig_*` function takes already-computed results plus a few scalar
@@ -29,8 +27,6 @@ a first pyplot call. A bare Figure returned before that has ever happened
 displays as the text `<Figure size 792x484 with 1 Axes>` and **no image at
 all** — which depends on what other cells ran first, so it fails silently and
 inconsistently. Going through `plt.subplots` guarantees the backend is live.
-
-`savefig` is unaffected by the close, which is what the slide baker relies on.
 
 Colours come from `sbi4cogsci_style`, so a colour means the same thing here as
 in every other session.
@@ -184,7 +180,8 @@ def pooling_experiment(**kwargs):
                       "partial_pooling": p_loo.get("partial")}}
 
 
-def fig_shrinkage(result, *, split_at=30, ax=None, ylabel="estimated drift $v$",
+def fig_shrinkage(result, *, split_at=30, ax=None, legend=True,
+                  ylabel="estimated drift $v$",
                   title="Shrinkage: who gets moved, and how far"):
     """Each participant as an arrow from its no-pooling to its partial-pooling
     estimate, against how many trials they contributed.
@@ -195,6 +192,9 @@ def fig_shrinkage(result, *, split_at=30, ax=None, ylabel="estimated drift $v$",
     Works on any result dict carrying `trial_counts`, `v_true`, `no_pooling` and
     `partial_pooling` — which is why the regression capstone reuses it rather
     than defining a second near-identical plot.
+
+    Pass `legend=False` when stacking two of these in one figure; one key is
+    enough and the panels are cramped enough without a second.
     """
     fig = None
     if ax is None:
@@ -214,30 +214,61 @@ def fig_shrinkage(result, *, split_at=30, ax=None, ylabel="estimated drift $v$",
     ax.axvline(split_at, color=S.MUTED, ls=":", lw=1)
     ax.set(xscale="log", xlabel="trials contributed by this participant (log)",
            ylabel=ylabel, title=title)
-    ax.legend(loc="lower right", fontsize=9, ncol=3)
+    if legend:
+        ax.legend(loc="lower right", fontsize=9, ncol=3)
     if fig is not None:
         fig.tight_layout()
     return fig if fig is not None else ax.figure
 
 
-def fig_pooling_error(result, *, split_at=30, ax=None):
-    """Absolute error against trial count, for both fits."""
+def fig_pooling_error(result, *, split_at=30, axes=None):
+    """Per-participant error, and the gain from pooling, against trial count.
+
+    Participants are separate entities, so nothing is joined across them — the
+    only line segments are the vertical ones linking each participant's own two
+    estimates, whose length IS the gain.
+    """
     fig = None
-    if ax is None:
-        fig, ax = _new_figure((7.2, 4.0))
-    n = result["trial_counts"]
-    for key, colour, label in (("no_pooling", S.NAIVE, "no pooling"),
-                               ("partial_pooling", S.PRIMARY, "partial pooling")):
-        ax.plot(n, np.abs(result[key] - result["v_true"]), "o-", color=colour,
-                ms=5, lw=1.4, label=label)
-    ax.axvline(split_at, color=S.MUTED, ls=":", lw=1)
-    ax.set(xscale="log", xlabel="trials contributed (log)",
-           ylabel=r"$|\hat{v} - v_{\mathrm{true}}|$",
-           title="The gain is concentrated where the data is thin")
-    ax.legend(fontsize=9)
+    if axes is None:
+        fig, axes = _new_figure((11.5, 4.2), 1, 2)
+    ax1, ax2 = axes
+
+    n = np.asarray(result["trial_counts"], dtype=float)
+    err_no = np.abs(result["no_pooling"] - result["v_true"])
+    err_pp = np.abs(result["partial_pooling"] - result["v_true"])
+    gain = err_no - err_pp                      # > 0 means pooling helped
+
+    # --- left: both estimates, joined only WITHIN a participant -------------
+    for xi, lo, hi in zip(n, err_no, err_pp):
+        ax1.plot([xi, xi], [lo, hi], "-", color=S.MUTED, lw=1.2, zorder=1)
+    ax1.plot(n, err_no, "o", color=S.NAIVE, ms=6, ls="none", label="no pooling",
+             zorder=2)
+    ax1.plot(n, err_pp, "o", color=S.PRIMARY, ms=6, ls="none",
+             label="partial pooling", zorder=3)
+    ax1.axvline(split_at, color=S.MUTED, ls=":", lw=1)
+    ax1.set(xscale="log", xlabel="trials contributed (log)",
+            ylabel=r"$|\hat{v} - v_{\mathrm{true}}|$",
+            title="Error per participant")
+    ax1.legend(fontsize=9)
+
+    # --- right: the gain on its own -----------------------------------------
+    helped = gain > 0
+    ax2.vlines(n[helped], 0, gain[helped], color=S.ALT, lw=1.2, zorder=1)
+    ax2.vlines(n[~helped], 0, gain[~helped], color=S.DIVERGENT, lw=1.2, zorder=1)
+    ax2.plot(n[helped], gain[helped], "o", color=S.ALT, ms=6, ls="none",
+             label="pooling helped", zorder=2)
+    ax2.plot(n[~helped], gain[~helped], "o", color=S.DIVERGENT, ms=6, ls="none",
+             label="pooling hurt", zorder=2)
+    ax2.axhline(0.0, color=S.TRUTH, lw=1.2)
+    ax2.axvline(split_at, color=S.MUTED, ls=":", lw=1)
+    ax2.set(xscale="log", xlabel="trials contributed (log)",
+            ylabel="error reduction", title="The gain, on its own")
+    ax2.legend(fontsize=9)
+
     if fig is not None:
+        fig.suptitle("The gain is concentrated where the data is thin", y=1.02)
         fig.tight_layout()
-    return fig if fig is not None else ax.figure
+    return fig if fig is not None else ax1.figure
 
 
 # --------------------------------------------------------------------------
@@ -349,30 +380,44 @@ def regression_experiment(seed=0, **kwargs):
 EIGHT_SCHOOLS_Y = np.array([28.0, 8.0, -3.0, 7.0, -1.0, 1.0, 18.0, 12.0])
 EIGHT_SCHOOLS_SE = np.array([15.0, 10.0, 16.0, 11.0, 9.0, 11.0, 10.0, 18.0])
 
-#: More groups makes the funnel *worse*, and that is the point of using more
-#: than eight. Every group contributes one theta that has to fit through the
-#: same neck, so the centered parameterization has to thread N coordinates
-#: simultaneously rather than eight. Measured on this panel, weak likelihood,
-#: centered, as the group count rises 8 -> 16 -> 32 -> 64:
+#: Rubin's eight, unmodified. Measured, not assumed — the ladder below is the
+#: reason, and an earlier version of this file used 32 on the strength of a
+#: ladder that turned out to be an artifact of a too-tight tau prior.
 #:
-#:     divergences   346 ->  333 ->  670 -> 1038
-#:     ESS(tau)      390 ->  163 ->   67 ->   11
+#: Re-measured under PRIOR_SCALE, weak likelihood, centered, at 8/16/32/64
+#: groups:
 #:
-#: while the non-centered fit stays healthy throughout (ESS(tau) 4577 -> 2689).
-DEFAULT_N_GROUPS = 32
+#:     divergences   466 -> 309 -> 343 ->  77
+#:     ESS(tau)      136 -> 178 ->  93 -> 138
+#:
+#: i.e. the centered funnel is roughly *as bad* at every panel size. Group count
+#: does not help it and does not hurt it much either.
+#:
+#: The non-centered side is the one that cares. Its pathology lives in tau's
+#: UPPER tail, and more groups pin tau. Strong likelihood, non-centered, same
+#: ladder:
+#:
+#:     divergences    88 ->  21 ->   2 ->   0
+#:     ESS(tau)      821 -> 565 -> 311 -> 163
+#:
+#: Note those two rows disagree: the divergences vanish while the efficiency
+#: keeps getting worse. More groups does not repair the geometry, it removes the
+#: tau values extreme enough to expose it.
+#:
+#: So eight is not a compromise. It is the only size at which both halves of
+#: this demonstration are visible at once.
+DEFAULT_N_GROUPS = 8
 
 
 def simulate_school_panel(n_groups=DEFAULT_N_GROUPS, seed=0):
-    """A panel with the *eight-schools character*, at any number of groups.
+    """Rubin's (1981) eight schools, or a synthetic panel of the same character.
 
-    The property that matters is not the specific numbers, it is that each
-    group's effect is small next to its own standard error. That is what lets
-    the posterior for tau reach zero, which is what makes the neck reachable.
-    So: standard errors spanning the same range as Rubin's, and a true tau of
-    zero.
-
-    Returns the real Rubin (1981) data unchanged when `n_groups == 8`, so the
-    canonical case is still exactly the canonical case.
+    At the default `n_groups == 8` this returns the real data unchanged. Larger
+    panels — used only by the group-count ladder in `DEFAULT_N_GROUPS` — are
+    simulated to share the property that actually matters: each group's effect
+    is small next to its own standard error, which is what lets the posterior
+    for tau reach zero and so makes the neck reachable. Standard errors spanning
+    Rubin's range, and a true tau of zero.
     """
     if n_groups == 8:
         return EIGHT_SCHOOLS_Y.copy(), EIGHT_SCHOOLS_SE.copy()
@@ -381,19 +426,41 @@ def simulate_school_panel(n_groups=DEFAULT_N_GROUPS, seed=0):
     return rng.normal(8.0, se), se
 
 
-def _hier_normal(y, se, *, parameterization):
+#: Prior scale for `mu` and `tau` in the geometry demonstration.
+#:
+#: Deliberately **not** 5, which is the value most eight-schools code uses. The
+#: schools' effects run up to 28 points and the strong-likelihood posterior for
+#: tau sits near 10, so HalfNormal(5) places two standard deviations between its
+#: own mode and where the data actually lands: it truncates the LARGE-tau tail.
+#:
+#: That tail is precisely where the non-centered parameterization pinches —
+#: sd(z_g | tau) -> sigma_g / tau — so the tighter prior quietly suppresses half
+#: of what this figure exists to show. Measured, 8 groups, se_scale 0.05,
+#: non-centered:
+#:
+#:     tau ~ HalfNormal(5)    ->   2 divergences, ESS(tau) 1491
+#:     tau ~ HalfNormal(25)   ->  88 divergences, ESS(tau)  821
+#:
+#: The centered fit reports zero divergences under both, so this is not a case
+#: of a loose prior making everything worse. It only uncovers the pathology that
+#: belongs to the coordinates.
+PRIOR_SCALE = 25.0
+
+
+def _hier_normal(y, se, *, parameterization, prior_scale=PRIOR_SCALE):
     """Hierarchical normal, centered or non-centered.
 
     A half-normal prior on tau, not a log-normal: a log-normal suppresses both
     zero and infinity and so hides the very geometry we are trying to show
-    (Betancourt, *Hierarchical Modeling*, 2020, §4.1).
+    (Betancourt, *Hierarchical Modeling*, 2020, §4.1). For the same reason the
+    scale is `PRIOR_SCALE` rather than the customary 5 — see the note there.
     """
     import pymc as pm
 
     n = y.size
     with pm.Model() as model:
-        mu = pm.Normal("mu", 0.0, 5.0)
-        tau = pm.HalfNormal("tau", 5.0)
+        mu = pm.Normal("mu", 0.0, prior_scale)
+        tau = pm.HalfNormal("tau", prior_scale)
         if parameterization == "centered":
             pm.Normal("theta", mu, tau, shape=n)
         else:
@@ -412,13 +479,22 @@ def geometry_experiment(se_scales=(1.0, 0.05), draws=2000, tune=2000,
     (likelihood dominates). Varying the observation scale is exactly the
     manipulation Betancourt & Girolami use for their Figure 8.
 
-    `n_groups` defaults to more than eight because the funnel sharpens with the
-    group count — see `DEFAULT_N_GROUPS`. Pass 8 for Rubin's original data.
+    Getting the strong-likelihood row to show its pathology rather than merely
+    lose efficiency took two things, both of them easy to get wrong:
+    `DEFAULT_N_GROUPS` (tau must be free to wander) and `PRIOR_SCALE` (its upper
+    tail must not be truncated). Both notes are worth reading before changing
+    any constant here.
     """
     import pymc as pm
     import arviz as az
 
     y, se_base = simulate_school_panel(n_groups, seed=seed)
+    # Which group to plot. NOT group 0: in non-centered coordinates the ridge is
+    # z_g = (y_g - mu) / tau, whose slope against log tau is -z_g, so a group
+    # sitting near the population mean draws a flat blob however bad the
+    # geometry is. Pick the group furthest from the mean, and pick it from the
+    # DATA so that both parameterizations plot the same group.
+    focal = int(np.argmax(np.abs(y - y.mean())))
     out = {}
     for scale in se_scales:
         se = se_base * scale
@@ -435,7 +511,7 @@ def geometry_experiment(se_scales=(1.0, 0.05), draws=2000, tune=2000,
             log_tau = np.log(post["tau"].values.ravel())
             out[(scale, par)] = {
                 "coord_name": coord,
-                "coord": post[coord].values.reshape(log_tau.size, -1)[:, 0],
+                "coord": post[coord].values.reshape(log_tau.size, -1)[:, focal],
                 "log_tau": log_tau,
                 "diverging": idata.sample_stats["diverging"].values.ravel(),
                 "n_divergences": int(idata.sample_stats["diverging"].values.sum()),
@@ -444,8 +520,19 @@ def geometry_experiment(se_scales=(1.0, 0.05), draws=2000, tune=2000,
                 # sharply — divergences say something is wrong, this says how
                 # much of the chain was actually worth having.
                 "ess_tau": float(az.ess(idata, var_names=["tau"]).tau),
+                # Where the chain STOPS is the other half of the story: in the
+                # weak row the centered chain cannot get down, in the strong row
+                # the non-centered chain cannot get up.
+                "max_log_tau": float(log_tau.max()),
+                # The blunt summary of the panel's shape. Non-centering exists
+                # to decouple the group coordinate from tau; under a strong
+                # likelihood this is where you watch it fail to.
+                "corr": float(np.corrcoef(
+                    post[coord].values.reshape(log_tau.size, -1)[:, focal],
+                    log_tau)[0, 1]),
             }
-    return {"results": out, "se_scales": tuple(se_scales), "n_groups": n_groups}
+    return {"results": out, "se_scales": tuple(se_scales), "n_groups": n_groups,
+            "focal": focal}
 
 
 def fig_geometry_grid(experiment, figsize=(11.0, 7.2)):
@@ -455,8 +542,13 @@ def fig_geometry_grid(experiment, figsize=(11.0, 7.2)):
     weak-data row the centered chain simply stops, while the non-centered one
     carries on orders of magnitude further down. You are looking for where the
     blue points *end*, not only for their shape.
+
+    Both rows plot the same group — the one furthest from the population mean,
+    chosen in `geometry_experiment`. See the note there for why group 0 will not
+    do.
     """
     res, scales = experiment["results"], experiment["se_scales"]
+    sub = experiment.get("focal", 0) + 1
     fig, axes = _new_figure(figsize, 2, 2)
     for r, scale in enumerate(scales):
         row = [res[(scale, p)] for p in ("centered", "non-centered")]
@@ -472,10 +564,14 @@ def fig_geometry_grid(experiment, figsize=(11.0, 7.2)):
             ax.set_ylim(lo, hi)                      # shared within the row
             strength = "weak likelihood" if scale == max(scales) else "strong likelihood"
             symbol = r"\theta" if d["coord_name"] == "theta" else "z"
+            # Report the whole reachable range of log tau, not just its floor:
+            # the weak row is decided at the bottom end and the strong row at
+            # the top, and one uniform label lets you see both.
             ax.set(title=f"{par} — {strength}\n"
-                         f"{d['n_divergences']} divergences, "
-                         f"reaches $\\log\\tau$ = {d['min_log_tau']:.1f}",
-                   xlabel=f"${symbol}_1$",
+                         f"{d['n_divergences']} divergences,  "
+                         f"$\\log\\tau \\in$ "
+                         f"[{d['min_log_tau']:.1f}, {d['max_log_tau']:.1f}]",
+                   xlabel=f"${symbol}_{{{sub}}}$",
                    ylabel=r"$\log \tau$" if c == 0 else "")
     fig.tight_layout()
     return fig

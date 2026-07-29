@@ -15,9 +15,6 @@
 #
 # **Day 3, 11:00 — 60 minutes.** Alexander Fengler (with Brandon Turner).
 #
-# The motivating slides are
-# [here](hierarchical-mcmc-slides.qmd). This notebook is the hands-on half.
-#
 # Yesterday afternoon we saw posteriors that were hard because they were
 # **correlated** — a long thin ridge, but the same shape everywhere. Hierarchical
 # models bring a nastier relative: **curvature that changes as you move**. No
@@ -98,17 +95,43 @@ DRAWS, TUNE, CHAINS = 1000, 1000, 4
 print("pymc", pm.__version__, "| arviz", az.__version__)
 
 # %% [markdown]
-# ## 1. First: why would you want a hierarchy at all?
+# ## 1. Why a hierarchy at all?
 #
-# Most of this session is about a *problem* hierarchical models create. That
-# ordering is misleading unless we first establish what they buy you, so start
-# there.
+# Most of this session is about a *problem* hierarchical models create — so
+# first, what they buy you.
+#
+# There are three options, and they are **one equation with three choices of a
+# single term**. With $G$ participants and trials $i$ within each:
+#
+# $$
+# p(\theta_{1:G},\, \phi \mid y) \;\propto\;
+# \prod_{g=1}^{G} \Big[ \prod_{i} p(y_{gi} \mid \theta_g)
+#                       \cdot p(\theta_g \mid \phi) \Big] \cdot p(\phi)
+# $$
+#
+# First factor the **likelihood**, second the **population** term, third the
+# **hyperprior**. Every argument about pooling is an argument about the middle
+# one:
+#
+# | | population term $p(\theta_g \mid \phi)$ |
+# |---|---|
+# | **complete pooling** | a point mass — every $\theta_g$ is the same $\theta$ |
+# | **no pooling** | a fixed wide prior, identical and independent for each $g$ |
+# | **partial pooling** | a distribution whose $\phi$ is **estimated from the data** |
+#
+# A hierarchy is not a new inference rule — it is the ordinary posterior with one
+# extra layer in the prior. What changes is that participants stop being
+# independent: each estimate now depends on what the others said, through $\phi$.
+#
+# Complete pooling is what you are doing whenever you aggregate across
+# participants and fit once, and it is wrong the moment participants differ. The
+# other two are the interesting comparison.
 #
 # Motivating setting: **unbalanced** data across participants. Some
 # participants completed hundreds of trials, some barely turned up.
 
 # %%
-import sbi4cogsci_figures as F      # shared with the slide deck — one source
+import sbi4cogsci_figures as F      # the shared figure module
 
 pool = F.pooling_experiment(seed=RANDOM_SEED)
 counts = pool["trial_counts"]
@@ -118,12 +141,9 @@ print(f"  the five thinnest: {sorted(counts)[:5]}")
 
 # %% [markdown]
 # Each participant has their own drift rate, drawn from a population. We fit the
-# same data twice — **no pooling** (each participant estimated alone) and
-# **partial pooling** (participants drawn from an estimated population) — and
-# compare both against the drift rates we actually used.
-#
-# `a`, `z` and `t` are held at their true values so that the comparison is about
-# pooling and nothing else.
+# same data twice, **no pooling** and **partial pooling**, and compare both
+# against the drift rates we actually used. `a`, `z` and `t` are held at their
+# true values, so the comparison is about pooling and nothing else.
 
 # %%
 summary = F.pooling_summary(pool)
@@ -137,22 +157,30 @@ print(f"\nimprovement where trials < 30: {summary['low_n_improvement_pct']:.0f}%
 F.fig_shrinkage(pool)
 
 # %% [markdown]
-# Every arrow is one participant, running from their no-pooling estimate to
-# their partial-pooling one. The arrows are long on the left and invisible on
-# the right: **pooling moves exactly the participants who could not speak for
-# themselves, and leaves the others alone.**
+# One arrow per participant, from their no-pooling estimate to their
+# partial-pooling one. Long on the left, invisible on the right: pooling moves
+# the participants who could not speak for themselves and leaves the rest
+# alone.
 
 # %%
 F.fig_pooling_error(pool)
 
 # %% [markdown]
+# The right panel is the gain on its own: every large bar sits left of the
+# dotted line, and past it the bars are invisible.
+#
+# The red ones are the exceptions. Pooling drags each participant toward the
+# population, which overshoots whenever one genuinely sits far from it. The
+# guarantee is on the average — the MAE above — not on any individual.
+
+# %% [markdown]
 # <details class="sbi-note">
 # <summary>📝 <b>What pooling actually is</b></summary>
 #
-# With five trials, a no-pooling estimate has almost no information to work
-# with, so it falls back on whatever prior you happened to write down. Partial
-# pooling also falls back on a prior — but on the **population**, estimated from
-# the participants who did have data.
+# With five trials, a no-pooling estimate has almost no information, so it falls
+# back on whatever prior you happened to write down. Partial pooling also falls
+# back on a prior — but on the **population**, estimated from the participants
+# who did have data.
 #
 # **Pooling replaces an arbitrary prior with an earned one.** That is the whole
 # idea, and everything after this is the price you pay for it.
@@ -179,20 +207,38 @@ F.fig_pooling_error(pool)
 # the standard error is tiny, the weight goes to ~1, and the estimate barely
 # moves. With 5 trials the standard error is large and the population wins.
 #
-# Hold on to this: it is the same quantity that decides which
-# **parameterization** each group wants, later in this notebook.
+# Hold on to this: the same quantity decides which **parameterization** each
+# group wants.
 #
 # </details>
 
 # %% [markdown]
 # ### Did we not just add parameters?
 #
-# Counted naively, partial pooling is the **bigger** model — it has everything
-# no-pooling has, plus $\mu$ and $\tau$. And it generalised better. Either
-# Occam's razor is wrong, or we are counting the wrong thing.
+# Counted naively, partial pooling is the **bigger** model — everything
+# no-pooling has, plus $\mu$ and $\tau$ — and it generalised better. Either
+# Occam's razor is wrong or we are counting the wrong thing.
 #
-# The right thing to count is the **effective** number of parameters, `p_loo`,
-# which we already computed above.
+# <details class="sbi-note" open>
+# <summary>📝 <b>What <code>p_loo</code> measures</b></summary>
+#
+# How many parameters the model is effectively using — *measured*, not counted:
+#
+# $$
+# p_{\text{loo}} \;=\; (\text{fit to the data you have}) \;-\;
+#                      (\text{predicted fit to data you do not}),
+# $$
+#
+# with the second term estimated by leave-one-out cross-validation.
+#
+# A very flexible model fits what it saw much better than what it did not — a
+# **big gap**. A rigid model fits both about equally — a **small gap**. That gap
+# is the price of flexibility, denominated in parameters.
+#
+# On a simple model with flat priors it lands near the nominal count. Anything
+# that **constrains** parameters — a prior, or a hierarchy — pushes it below.
+#
+# </details>
 
 # %%
 print(f"{'':18s} {'nominal':>9s} {'effective (p_loo)':>19s}")
@@ -214,10 +260,9 @@ for key, label in [("no_pooling", "no pooling"), ("partial_pooling", "partial po
 #
 # **The gap depends on how sparse your groups are.** Ours has participants with
 # five trials, and those shrink a lot. Re-run with 600 trials for everyone and
-# the gap nearly closes: each participant's own data identifies their drift,
-# shrinkage has nothing to pull against, and `p_loo` approaches the nominal
-# count. The effective-parameter story is a statement about *your data*, not
-# about hierarchical models in the abstract.
+# the gap nearly closes: each participant's own data identifies their drift, and
+# `p_loo` approaches the nominal count. The effective-parameter story is a
+# statement about *your data*, not about hierarchical models in the abstract.
 #
 # **`elpd_loo` was essentially a tie.** Trial-level LOO is dominated by the
 # participants who had plenty of trials, so it barely notices the improvement
@@ -240,31 +285,29 @@ for key, label in [("no_pooling", "no pooling"), ("partial_pooling", "partial po
 # %% [markdown]
 # ## 2. Neal's funnel — the geometry, before any data
 #
-# Neal (2003) reduced the whole problem to two lines:
+# Neal (2003) reduced the problem to two lines:
 #
 # $$v \sim \text{Normal}(0, 3), \qquad x_i \mid v \sim \text{Normal}\!\left(0, e^{v/2}\right)$$
 #
-# There is no data and no likelihood. This is a *prior* — the shape a
-# hierarchical model has before the data says anything. `v` plays the role of
-# a log population scale, and `x` the role of group-level parameters.
+# No data, no likelihood. This is a *prior* — the shape a hierarchical model
+# has before data says anything. `v` is a log population scale, `x` a
+# group-level parameter.
 
 # %%
-# Same function the slide deck bakes its copy of this figure from.
 x_prior, v_prior = F.funnel_draws(n=40_000, sd_v=3.0, seed=RANDOM_SEED)
 F.fig_funnel(x_prior, v_prior)
 
 # %% [markdown]
-# At $v = 2$ the conditional standard deviation of $x$ is $e^{1} \approx 2.7$.
-# At $v = -6$ it is $e^{-3} \approx 0.05$ — **fifty times narrower**. A step size
-# tuned for the mouth is wildly unstable in the neck; one tuned for the neck
-# would take forever to cross the mouth.
+# At $v = 2$ the conditional sd of $x$ is $e^{1} \approx 2.7$; at $v = -6$ it is
+# $e^{-3} \approx 0.05$, **fifty times narrower**. A step size tuned for the
+# mouth is unstable in the neck; one tuned for the neck crawls across the
+# mouth.
 #
 # <details class="sbi-key" open>
 # <summary>🔑 <b>The failure mode is bias, not slowness</b></summary>
 #
-# A sampler that cannot enter the neck does not merely explore it *slowly* — it
-# systematically **never goes there**, so every posterior expectation is wrong.
-# And $\hat{R}$ cannot see this, because all the chains fail the same way.
+# A sampler that cannot enter the neck does not explore it *slowly* — it never
+# goes there, so every posterior expectation is wrong.
 #
 # </details>
 
@@ -280,8 +323,8 @@ F.fig_funnel(x_prior, v_prior)
 # $$v \sim \text{Normal}(0,3), \qquad \tilde{x} \sim \text{Normal}(0,1),
 #   \qquad x = e^{v/2}\,\tilde{x}$$
 #
-# These describe the *same distribution*. They are different **coordinate
-# systems** for it, and the sampler only ever sees the coordinates.
+# The same distribution, in two coordinate systems. The sampler only ever sees
+# the coordinates — which is why the choice matters at all.
 
 # %%
 def funnel_centered(dim=1):
@@ -335,8 +378,8 @@ axes[0].set_ylabel("$v$")
 fig.tight_layout()
 
 # %% [markdown]
-# The divergences are not scattered at random — they **cluster in the neck**,
-# which is precisely the region the centered chain then under-samples.
+# The divergences **cluster in the neck** — the region the centered chain then
+# under-samples.
 #
 # > **Poll.** The centered run reports $\hat{R} = 1.00$ for `v`. What does that
 # > tell you?
@@ -359,8 +402,7 @@ fig.tight_layout()
 # %% [markdown]
 # ### Proving it is bias
 #
-# Efficiency problems shrink as you run longer. Bias does not. Track the running
-# mean of `v` — we know the true value is 0.
+# Efficiency problems shrink as you run longer. Bias does not.
 
 # %%
 fig, ax = plt.subplots(figsize=(7, 4))
@@ -389,33 +431,134 @@ for ta in [0.8, 0.95, 0.99]:
                  "divergences": int(idata.sample_stats["diverging"].values.sum()),
                  "min v reached": v.min(),
                  "mean v (true 0)": v.mean()})
+
+
+# %%
+# print the table
 print(pd.DataFrame(rows).to_string(index=False, float_format=lambda x: f"{x:8.3f}"))
 
 # %% [markdown]
-# Divergences drop. The estimate does not become correct. **Raising
-# `target_accept` suppresses the symptom, not the geometry** — it is a
-# diagnostic aid, not a fix. The fix is to change coordinates.
+# Divergences drop; the estimate does not become correct. Raising
+# `target_accept` suppresses the symptom, not the geometry. It is a diagnostic
+# aid. The fix is to change coordinates.
+
+# %% [markdown]
+# ### Why changing coordinates fixes it
+#
+# Drop the funnel's notation and use the hierarchy's:
+#
+# $$
+# \mu \sim p(\mu), \qquad \tau \sim p(\tau), \qquad
+# \theta_g \mid \mu, \tau \sim \text{Normal}(\mu, \tau^2), \qquad
+# y_g \mid \theta_g \sim p(y_g \mid \theta_g).
+# $$
+#
+# **Centered** means sampling $(\mu, \tau, \theta_1, \dots, \theta_G)$ — the
+# parameters as written. **Non-centered** means sampling
+# $(\mu, \tau, z_1, \dots, z_G)$ with
+#
+# $$
+# z_g \sim \text{Normal}(0, 1), \qquad \theta_g = \mu + \tau z_g .
+# $$
+#
+# The map is a bijection for any fixed $\tau > 0$, with constant Jacobian
+# $\partial \theta_g / \partial z_g = \tau$, so the two describe **the same
+# posterior**. Nothing statistical changes. What changes is the surface the
+# sampler walks on.
+#
+# ### The prior term is the whole story
+#
+# Write down the prior contribution in each coordinate system. Centered:
+#
+# $$
+# \log p(\theta_g \mid \mu, \tau) =
+# -\log \tau - \frac{(\theta_g - \mu)^2}{2\tau^2} + \text{const}.
+# $$
+#
+# That expression **couples $\theta_g$ to $\tau$**: the width of the band
+# $\theta_g$ may occupy *is* $\tau$ — a sliver at small $\tau$, wide at large.
+# Plot the admissible set over $(\log \tau, \theta_g)$ and you get the funnel
+# from section 2 — narrow neck, wide mouth.
+#
+# Non-centered:
+#
+# $$
+# \log p(z_g) = -\frac{z_g^2}{2} + \text{const}.
+# $$
+#
+# **No $\tau$.** The prior geometry of $z_g$ is a unit Gaussian whatever $\tau$
+# does, so $z$ and $\tau$ are *a priori independent* and the funnel is gone —
+# not tamed, absent. The $\tau$-dependence has been moved out of the geometry
+# and into the deterministic line $\theta_g = \mu + \tau z_g$, which the sampler
+# never has to explore.
+#
+# ### Why a sampler cares about the shape at all
+#
+# HMC and NUTS discretise a trajectory with **one step size** and one mass
+# matrix for the whole space. A step size is a claim about the scale of the
+# distribution, and a funnel has no single scale: a step that suits the mouth
+# overshoots the neck and the integrator diverges.
+#
+# So the chain does not sample the neck badly — it fails to enter it, and every
+# expectation comes out biased, as section 3 measured. Non-centering does not
+# make the sampler cleverer. It hands it a space where one step size is
+# defensible everywhere.
+#
+# ### And why it is not free
+#
+# The likelihood has been silent so far. Reinstate it, in non-centered
+# coordinates:
+#
+# $$
+# \log p(y_g \mid \mu + \tau z_g).
+# $$
+#
+# Now $z_g$ and $\tau$ appear **together in the likelihood**. When $y_g$ carries
+# real information about $\theta_g$, it pins the *product* $\mu + \tau z_g$, so
+# raising $\tau$ must be met by shrinking $z_g$ — a fresh correlation, in the
+# coordinates we adopted to remove one.
+#
+# Take group $g$ observed with standard error $\sigma_g$, and hold $\mu$ and
+# $\tau$ fixed. Prior and likelihood are both Gaussian in $z_g$, so the
+# conditional is too, with
+#
+# $$
+# \operatorname{sd}(z_g \mid \tau) \;=\;
+# \frac{\sigma_g}{\sqrt{\sigma_g^{2} + \tau^{2}}}
+# \;\;\xrightarrow[\;\tau \gg \sigma_g\;]{}\;\; \frac{\sigma_g}{\tau} .
+# $$
+#
+# Read the two ends. When $\tau \ll \sigma_g$ the width is $1$ — the prior, flat
+# in $\tau$, which is the good case we just built. When $\tau \gg \sigma_g$ the
+# width **pinches shut like $1/\tau$**.
+#
+# A funnel again, upside down: the centered one closes at the *bottom* of
+# $\log\tau$, the non-centered one at the *top*. Which end you live at is
+# decided by $\sigma_g$ — whether group $g$'s own data is precise relative to
+# how much the groups differ.
+#
+# That is the whole trade:
+#
+# | | prior term | likelihood term | so |
+# |---|---|---|---|
+# | **centered** | couples $\theta_g$ to $\tau$ — funnel at small $\tau$ | clean, sees $\theta_g$ directly | good when data dominates |
+# | **non-centered** | independent of $\tau$ — no funnel | couples $z_g$ to $\tau$ — funnel at large $\tau$ | good when the prior dominates |
+#
+# Neither is correct in general.
 
 # %% [markdown]
 # ## 4. Non-centered is not always better
 #
-# This is the part most tutorials get wrong. The choice depends on whether the
-# **prior** or the **likelihood** dominates each group's posterior
-# (Papaspiliopoulos, Roberts & Sköld 2007; Betancourt & Girolami 2013):
-#
-# - **little data per group** → prior dominates → **non-centered** wins
-# - **lots of data per group** → likelihood dominates → **centered** wins
-#
-# Let us find the crossover instead of taking it on faith. A standard
-# hierarchical normal, sweeping the number of observations per group — and
-# sweeping it well past the point where the crossover happens, because the
-# behaviour on the far side is half the lesson.
+# Which one wins depends on whether the **prior** or the **likelihood**
+# dominates each group's posterior (Papaspiliopoulos, Roberts & Sköld 2007;
+# Betancourt & Girolami 2013). Rather than take the crossover on faith, measure
+# it: a hierarchical normal, swept well past it, because the far side is half
+# the lesson.
 
 # %%
-# Two things get swept, not one. `obs_per_group` is the usual axis. But the
-# NUMBER of groups is a second knob on the same geometry — every group adds one
-# theta that must fit through the same neck — so we run the whole sweep at two
-# panel sizes and let them be compared.
+# Two axes, not one. The NUMBER of groups is a second knob on the same geometry
+# — every group adds a theta that must fit through the same neck — so the sweep
+# runs at two panel sizes.
 GROUP_COUNTS = [8, 24]
 OBS_PER_GROUP = [1, 3, 10, 30, 100, 300, 1000]      # well past the crossover
 TRUE_MU, TRUE_TAU, OBS_SIGMA = 0.0, 1.0, 1.0
@@ -428,8 +571,6 @@ def make_groups(n_groups, obs_per_group, seed):
     return y.mean(axis=1), OBS_SIGMA / np.sqrt(obs_per_group)
 
 
-# Both builders take their group count from the data, so nothing is pinned to a
-# module-level constant and the sweep can vary it freely.
 def hier_centered(y_bar, se):
     with pm.Model() as m:
         mu = pm.Normal("mu", 0.0, 5.0)
@@ -464,6 +605,7 @@ for n_groups in GROUP_COUNTS:
                           "ESS(tau)": ess,
                           "ESS per 1k grads": 1000 * ess / grads if grads == grads else np.nan})
 
+# %%
 sweep = pd.DataFrame(sweep)
 for n_groups in GROUP_COUNTS:
     print(f"\n--- {n_groups} groups " + "-" * 44)
@@ -491,22 +633,17 @@ fig.tight_layout()
 # %% [markdown]
 # Read the right-hand panel first, and note the **log** vertical axis. The two
 # curves cross almost immediately — non-centered wins only in the sparsest
-# column, at one observation per group — and then they separate by orders of
-# magnitude. By 1000 observations per group, centering is worth a **hundredfold
-# to two-hundredfold** difference in ESS per unit of work, depending on panel
-# size. The far end of this sweep is not a curiosity; it is where a lot of real
-# cognitive data sits.
-#
-# Now the left panel, which is interesting for a different reason.
+# column, at one observation per group — and then separate: by 1000 observations
+# per group, centering is worth a **hundredfold to two-hundredfold** difference
+# in ESS per unit of work, depending on panel size. The far end of this sweep is
+# not a curiosity; it is where a lot of real cognitive data sits.
 #
 # <details class="sbi-note">
 # <summary>📝 <b>The rule, stated properly</b></summary>
 #
 # "Always non-center hierarchical models" is the single most widespread piece of
 # wrong advice in applied Bayesian work. The correct statement is: **non-center
-# the parameters whose groups are data-poor.** With enough data per group the
-# centered form is better behaved, because then the likelihood — not the prior —
-# is what shapes each group's posterior.
+# the parameters whose groups are data-poor.**
 #
 # Which is why you want the choice to be **per parameter**.
 #
@@ -520,41 +657,40 @@ fig.tight_layout()
 # per group falls from 236 divergences to 6, and the non-centered fit's
 # complaints at the data-rich end (10, 13, 13) drop to (0, 0, 2).
 #
-# That is not the geometry being repaired. It is exactly Betancourt's remark,
-# which you can now read off a figure rather than take on trust: **more groups
-# means more information about $\tau$, which trims off the extreme values of
-# $\tau$ where the pathology lives.**
+# That is not the geometry being repaired. It is Betancourt's remark, now
+# readable off a figure: **more groups means more information about $\tau$,
+# which trims off the extreme values of $\tau$ where the pathology lives.**
 #
-# The efficiency panel keeps the same shape and the same ordering throughout. So
-# a clean divergence count is *not* evidence that you chose the right
-# parameterization — it may only mean you had enough groups to hide the
-# consequences of choosing the wrong one. Judge by ESS per gradient, and let
-# divergences tell you about correctness rather than about cost.
+# The efficiency panel keeps its shape and its ordering throughout. So a clean
+# divergence count is *not* evidence you chose the right parameterization — only
+# that you had enough groups to hide the wrong one. Judge by ESS per gradient,
+# and let divergences tell you about correctness rather than about cost.
 #
 # </details>
 #
 # ### What that looks like in the geometry
 #
-# The ESS curves say *that* the advantage reverses. This says *why*. Four fits —
-# both parameterizations, at weak and strong data — each plotted in the
-# coordinates its own sampler actually works in, against $\log\tau$, with
-# divergences overlaid.
+# The ESS curves say *that* the advantage reverses; this says *why*. Four fits —
+# both parameterizations, at weak and strong data — each in the coordinates its
+# own sampler works in, against $\log\tau$, divergences overlaid. Rubin's eight
+# schools, unmodified.
 #
-# The panel here is deliberately larger than the eight-schools dataset this
-# demonstration is traditionally built on. **The group count is itself a knob on
-# the geometry**: every group contributes one $\theta$ that has to pass through
-# the same neck, so a centered sampler on 32 groups is threading 32 coordinates
-# at once rather than eight. Measured on this panel, weak likelihood, centered:
+# Two details of the setup are load-bearing; get either wrong and the
+# bottom-right panel looks harmless when it is not.
 #
-# | groups | divergences | ESS($\tau$) |
-# |---|---|---|
-# | 8 | 346 | 390 |
-# | 16 | 333 | 163 |
-# | 32 | 670 | 67 |
-# | 64 | 1038 | 11 |
+# **Which group gets plotted.** The non-centered ridge is
+# $z_g = (y_g - \mu)/\tau$, so its slope against $\log\tau$ is $-z_g$ — a group
+# sitting near the population mean draws a flat blob however bad the geometry
+# is. We plot the group furthest from the mean, chosen from the data so that
+# both columns show the same school.
 #
-# The non-centered fit stays healthy across all of them. Eight groups is enough
-# to *see* the problem; more makes it unmissable.
+# **The prior on $\tau$.** `HalfNormal(25)`, not the customary `HalfNormal(5)`.
+# The schools' effects run to 28 points and the strong-likelihood posterior for
+# $\tau$ sits near 10, so a scale of 5 truncates $\tau$'s *upper* tail — which
+# is exactly where the non-centered form pinches. Same data, same code, that one
+# number changed: **2 divergences becomes 88**, while the centered fit reports
+# zero either way. A prior tight enough to hide a pathology is not weakly
+# informative, whatever it says on the tin.
 
 # %%
 geom = F.geometry_experiment(seed=RANDOM_SEED)
@@ -563,39 +699,80 @@ F.fig_geometry_grid(geom)
 
 # %%
 print(f"{'parameterization':16s} {'se scale':>9s} {'divergences':>12s} "
-      f"{'min log tau':>12s} {'ESS(tau)':>10s}")
+      f"{'log tau reached':>17s} {'ESS(tau)':>10s} {'corr w/ log tau':>16s}")
 for (scale, par), d in geom["results"].items():
+    span = f"{d['min_log_tau']:6.2f} .. {d['max_log_tau']:5.2f}"
     print(f"{par:16s} {scale:9g} {d['n_divergences']:12d} "
-          f"{d['min_log_tau']:12.2f} {d['ess_tau']:10.1f}")
+          f"{span:>17s} {d['ess_tau']:10.1f} {d['corr']:16.2f}")
 
 # %% [markdown]
-# Read the four panels as a 2×2, and note that **the two panels in each row
-# share a $\log\tau$ axis** — that is what makes the comparison honest.
+# **The two panels in each row share a $\log\tau$ axis** — that is what makes
+# the comparison honest.
 #
-# **Top row (weak likelihood).** The centered chain simply *stops* around
-# $\log\tau \approx -0.9$, with hundreds of divergences piled against that floor.
-# The non-centered chain, on the same axis, carries on down past $-6$. The
-# centered sampler is not exploring the neck badly — it is not exploring it at
-# all, and it reports $\hat{R} \approx 1$ while failing. The ESS column is the
-# blunt version: **67 against 3491**, a fifty-fold difference from a change of
-# coordinates alone.
+# **Top row (weak likelihood).** The centered chain simply *stops* at
+# $\log\tau \approx 0$, with hundreds of divergences piled against that floor,
+# and reports $\hat{R} \approx 1$ while doing it. The non-centered chain, on the
+# same axis, carries on down past $-7$.
 #
-# **Bottom row (strong likelihood).** Centered is now clean — zero divergences,
-# a round blob. Non-centered has developed a hard **diagonal ridge**: to hold
-# $\theta_g$ where the data wants it while $\tau$ grows, $z_g$ must shrink. That
-# is the inverted funnel, and it is why the advice reverses. Here neither fit
-# diverges, so the divergence count tells you nothing and the ESS column tells
-# you everything — **18378 against 196**, now favouring centered.
+# **Bottom row (strong likelihood).** Everything swaps, and this is the panel to
+# look at hardest. Centered collapses to a round blob: the data pins $\theta_1$
+# near 28, $\tau$ has stopped mattering to it, correlation **+0.07**, zero
+# divergences. Non-centered has bent into a curved band with correlation
+# **−0.78** — that is $z_1 = (y_1 - \mu)/\tau$ traced out as $\tau$ moves, the
+# coupling we changed coordinates to get rid of, back again. It throws **88
+# divergences**, and they are not scattered: they sit at the **87th percentile**
+# of $\log\tau$, piled against the top of the band exactly as the centered
+# chain's pile against the bottom of the neck. It also stops climbing at
+# $\log\tau = 3.4$ where the centered chain reaches $3.8$.
+#
+# That is section 3's trade table, measured: the same pathology in the opposite
+# corner of the grid, at the opposite end of $\tau$. In both rows the tell is
+# identical — **the failing chain cannot reach where the healthy one goes.**
 #
 # <details class="sbi-note">
-# <summary>📝 <b>And yet non-centered is still the sensible default</b></summary>
+# <summary>📝 <b>Why the bottom-right band does not visibly taper</b></summary>
 #
-# The inverted funnel is *suppressed by partial pooling itself* — the more
-# groups there are informing $\tau$, the more its bad end gets cut off.
-# Betancourt puts it sharply: **"the pathological behavior is the worst exactly
-# when the partial pooling is strongest."** So the reversal usually costs you
-# efficiency rather than correctness, which is why "non-center by default, and
-# reconsider when a group is data-rich" is reasonable advice.
+# The derivation says $\operatorname{sd}(z_g \mid \tau) \to \sigma_g/\tau$, so
+# you might expect that band to close like a wedge. It does not — measured
+# across quartiles of $\log\tau$, its width is 0.46, 0.37, 0.37, 0.39.
+#
+# Because the panel is a **marginal**, and $\mu$ is free in it. With
+# $z_g = (\theta_g - \mu)/\tau$ and $\mu$ carrying posterior sd
+# $\tau/\sqrt{G}$, $\mu$ alone contributes $1/\sqrt{G} = 0.35$ to the width of
+# $z_g$ — the same at every $\tau$. The $\sigma_g/\tau$ pinch runs from 0.15
+# down to 0.02 underneath that and is simply swamped.
+#
+# The conditional funnel is real and it is what the sampler feels. The marginal
+# shows it as **curvature and correlation** instead of as a taper. Worth
+# remembering generally: a 2-D marginal is not the geometry, it is a shadow of
+# it.
+#
+# </details>
+#
+# <details class="sbi-note">
+# <summary>📝 <b>Why the panel is eight groups</b></summary>
+#
+# Because the group count only affects one of the two pathologies, and in the
+# direction that hides it — the effect the sweep's divergence panel showed
+# above, now playing out on the other parameterization.
+#
+# Re-run the whole grid at 8 / 16 / 32 / 64 groups. The centered fit under a
+# weak likelihood barely notices (466, 309, 343, 77 divergences). The
+# non-centered fit under a strong likelihood does this:
+#
+# | groups | 8 | 16 | 32 | 64 |
+# |---|---|---|---|---|
+# | divergences | **88** | 21 | 2 | **0** |
+# | ESS($\tau$) | **821** | 565 | 311 | **163** |
+#
+# The divergences vanish while the efficiency gets five times *worse*. More
+# groups does not repair the geometry; it pins $\tau$ and removes the extreme
+# values that expose it — Betancourt's **"the pathological behavior is the worst
+# exactly when the partial pooling is strongest."**
+#
+# Eight groups is where the reversal costs you correctness, which is why the
+# figure uses eight. At the group counts you will actually have, expect it to
+# cost you silently.
 #
 # </details>
 #
@@ -605,8 +782,9 @@ for (scale, par), d in geom["results"].items():
 # The crossover moves with the number of groups, the group-scale prior, and how
 # much the groups actually differ — so "the crossover is between 1 and 3
 # observations per group" is a fact about *this* setup, not a constant. You saw
-# one of those dependencies directly: changing only the panel size moved the
-# divergence counts substantially.
+# two of those dependencies measured on this page: the panel size took the
+# non-centered divergence count from 88 to 0, and the prior scale on $\tau$ took
+# it from 2 to 88.
 #
 # What transfers is the *shape*: two curves that cross, and a rule for which
 # side you are on. Run the sweep on your own model rather than importing a
@@ -654,8 +832,7 @@ def build(noncentered):
 
 mixed = build({"v": False, "a": True})
 
-# The PyMC graph is materialised at construction — `model.pymc_model` is ready
-# to inspect, and there is no `.build()` to call.
+# The PyMC graph is materialised at construction — no `.build()` to call.
 participant_nodes = sorted(n for n in mixed.pymc_model.named_vars
                            if "participant_id" in n)
 print("participant-level nodes:")
@@ -665,22 +842,21 @@ for n in participant_nodes:
 
 # %% [markdown]
 # The `_offset` nodes are the structural fingerprint of the non-centered
-# parameterization: `u_g = z_g · σ`. `a` has one, `v` does not — exactly what we
-# asked for. You can read the parameterization off the graph without sampling
-# anything.
+# parameterization: `u_g = z_g · σ`. `a` has one, `v` does not — read off the
+# graph, without sampling anything.
 
 # %% [markdown]
 # <details class="sbi-warn" open>
 # <summary>⚠️ <b>Two ways this bites</b></summary>
 #
 # **Non-centering only works for `Normal` priors whose `sigma` is itself a
-# random variable.:** 
-# 
+# random variable:**
+#
 # Anything else raises `NotImplementedError` when the model
 # is built — loud, at least.
 #
-# **Check for disconnected nodes:** 
-# 
+# **Check for disconnected nodes:**
+#
 # A `Normal` group prior with a nested `mu` hyperprior under
 # non-centering leaves `mu` as a **disconnected free variable** — sampled, but
 # influencing nothing. HSSM 0.4.0 ships detectors for this
@@ -690,6 +866,25 @@ for n in participant_nodes:
 # **silently dropped**.
 #
 # </details>
+
+# %% [markdown]
+# ### Where per-parameter runs out
+#
+# The choice is per *random effect*, so every group inside one effect gets the
+# same treatment — and groups can disagree. Betancourt's example: nine groups
+# with $N = (10, 5, \mathbf{1000}, 10, 1, 5, \mathbf{100}, 10, 5)$. Center
+# everything and the sparse groups funnel; non-center everything and the two
+# rich ones inverted-funnel. The right answer there is **per group**, which no
+# API on this page exposes.
+#
+# And it is quiet. Both monolithic fits on that panel diverge at rates of
+# **0.015%** and **0.005%** — a handful out of thousands, the kind you would
+# wave away. The aggregate count averages over groups, and two broken groups out
+# of nine do not move it. You find them the way section 4 did: plot $\theta_g$
+# or $z_g$ against $\log\tau$ **one group at a time**.
+#
+# The fix — split the groups at a size threshold and parameterize each half its
+# own way — needs per-group surgery on the model.
 
 # %% [markdown]
 # ### Exercise
@@ -713,16 +908,16 @@ for n in participant_nodes:
 # *within* each participant — the likelihood dominates, so **centered** is the
 # better choice for `v`. Parameters that are weakly constrained per participant,
 # or a group scale estimated from only 14 groups, are the ones that want
-# non-centering. This is the crossover from section 3, in a real model.
+# non-centering. This is the crossover from section 4, in a real model.
 #
 # </details>
 
 # %% [markdown]
 # ## 6. The capstone: a slope per participant
 #
-# Section 1 gave every participant their own *drift*. Real designs ask for more
-# than that: drift usually **varies within a participant** with some
-# manipulation. So give every participant their own **slope** as well:
+# Section 1 gave every participant their own *drift*. But drift usually
+# **varies within a participant** with some manipulation, so give every
+# participant a **slope** as well:
 #
 # $$v_{gi} \;=\; \beta^{(g)}_0 \;+\; \beta^{(g)}_1 \cdot \text{difficulty}_i,
 #   \qquad
@@ -746,27 +941,37 @@ for name in ("intercept", "slope"):
           f"   |  {s['low_n_improvement_pct']:.0f}% better where thin")
 
 # %%
-F.fig_shrinkage(reg["slope"], ylabel=r"estimated slope $\beta_1$",
-                title=r"Shrinkage on the difficulty slope $\beta_1$")
+# Both quantities, stacked on a shared x-axis: read straight down and you are
+# looking at the same participant twice.
+fig, axes = plt.subplots(2, 1, figsize=(7.6, 8.2), sharex=True)
+F.fig_shrinkage(reg["intercept"], ax=axes[0],
+                ylabel=r"estimated intercept $\beta_0$",
+                title=r"Intercept $\beta_0$ — drift at average difficulty")
+F.fig_shrinkage(reg["slope"], ax=axes[1], legend=False,
+                ylabel=r"estimated slope $\beta_1$",
+                title=r"Difficulty slope $\beta_1$ — how drift responds")
+axes[0].set_xlabel("")
+fig.tight_layout()
 
 # %% [markdown]
-# Look at the left-hand side. Without pooling, a participant with a handful of
-# trials gets a slope of **2.9** where the truth is near 1.2, and another gets a
-# slope that is essentially **zero** — or negative — where the truth is 1.4.
-# Those are not estimates, they are noise with a credible interval attached.
+# Look at the left-hand side of each panel. Neither quantity survives five
+# trials: the worst intercept lands at **−0.4** where the truth is 0.67, and the
+# worst slope at **2.9** where the truth is 1.23, with another at essentially
+# **zero** where the truth is 1.06. Those are not estimates, they are noise with
+# a credible interval attached.
 #
-# Partial pooling drags them back toward the population slope, which is the
-# best available guess for someone who has not given you enough data to say
-# otherwise. On the right-hand side, where participants *have* spoken for
-# themselves, the two methods agree and pooling changes nothing.
+# The slope is the worse of the two — MAE **0.60** against the intercept's
+# **0.35** where trials are thin — and it is the one pooling rescues hardest.
+# On the right-hand side both panels agree: participants who spoke for
+# themselves are left alone.
 #
 # <details class="sbi-note">
 # <summary>📝 <b>Why the slope gains more than the intercept</b></summary>
 #
 # The improvement where trials are thin is around **48%** for the intercept and
-# around **62%** for the slope. A slope is the harder quantity — it needs the
-# covariate to have moved *within* that participant — so it is the first thing
-# to fall apart when data is scarce, and the thing pooling rescues most.
+# around **62%** for the slope — the numbers behind the two panels above. The
+# slope gains more because it needs the covariate to have moved *within* that
+# participant.
 #
 # This is the practical argument for hierarchy in cognitive modelling. It is
 # rarely "we want a population estimate". It is "we want per-participant
@@ -794,16 +999,15 @@ F.fig_shrinkage(reg["slope"], ylabel=r"estimated slope $\beta_1$",
 # <details>
 # <summary>What to expect, and why</summary>
 #
-# Less pronounced in one sense and more in another. `a` is identified through
-# the *speed–accuracy relationship* rather than through trial count alone, so
-# adding trials helps it more slowly than it helps `v` — meaning even the
-# data-rich participants stay somewhat prior-dependent, and pooling keeps
-# earning its keep further to the right of the plot.
+# `a` is identified through the *speed–accuracy relationship* rather than
+# through trial count alone, so adding trials helps it more slowly than it helps
+# `v` — even the data-rich participants stay somewhat prior-dependent, and
+# pooling keeps earning its keep further to the right of the plot.
 #
-# That is the same observation as the per-parameter parameterization argument
-# in section 5: **different parameters are informed by different amounts of the
-# same data.** If you find `a` still shrinking hard at 600 trials, that is your
-# evidence that `a` wants a non-centered parameterization while `v` does not.
+# Same point as section 5: **different parameters are informed by different
+# amounts of the same data.** If you find `a` still shrinking hard at 600
+# trials, that is your evidence that `a` wants a non-centered parameterization
+# while `v` does not.
 #
 # </details>
 
@@ -814,7 +1018,12 @@ F.fig_shrinkage(reg["slope"], ylabel=r"estimated slope $\beta_1$",
 # - Papaspiliopoulos, Roberts & Sköld (2007). A general framework for the
 #   parametrization of hierarchical models. *Statistical Science* 22(1), 59–73.
 # - Betancourt & Girolami (2013). Hamiltonian Monte Carlo for hierarchical
-#   models. [arXiv:1312.0906](https://arxiv.org/abs/1312.0906)
+#   models. [arXiv:1312.0906](https://arxiv.org/abs/1312.0906) — the source of
+#   the weak/strong likelihood manipulation used in the geometry grid.
 # - Betancourt (2017). Diagnosing biased inference with divergences.
+# - Betancourt (2020). [Hierarchical
+#   modeling](https://betanalpha.github.io/assets/case_studies/hierarchical_modeling.html)
+#   — the long-form version of section 4, including why the prior on $\tau$ has
+#   to be chosen so that it does not hide the geometry.
 # - Gorinova, Moore & Hoffman (2020). Automatic reparameterisation of
 #   probabilistic programs. *ICML*.

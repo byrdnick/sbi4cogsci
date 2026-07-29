@@ -177,15 +177,7 @@ If you get GPU-related JAX errors, switch back to the CPU setup first and confir
 
 ## 8. What the TOML file means
 
-The important part of `pyproject.toml` is:
-
-```toml
-dependencies = [
-    "bayesflow>=2.0",
-    "hssm",
-    "jax",
-    "ipykernel",
-]
-```
-
-That says: when someone runs `uv sync`, install these Python packages into the local tutorial environment.
+The important part of `pyproject.toml` is its `dependencies = [...]` list — read
+it there rather than here, so the two cannot drift apart. It names the packages
+`uv sync` installs into the local tutorial environment: `bayesflow`, `hssm`,
+`pymc`, `arviz`, `bambi`, `ssm-simulators`, `jax` and friends.

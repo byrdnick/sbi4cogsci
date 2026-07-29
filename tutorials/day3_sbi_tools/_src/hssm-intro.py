@@ -52,24 +52,26 @@
 
 # %%
 # --- Google Colab bootstrap; does nothing anywhere else ---------------------
-import importlib.util, subprocess, sys, urllib.error, urllib.request
+import importlib.util, pathlib, subprocess, sys, urllib.error, urllib.request
 
 IN_COLAB = importlib.util.find_spec("google.colab") is not None
 
 # `main` once this is merged; the branch is the fallback so the Colab path can
 # be tested BEFORE the merge, when main does not yet have these files.
-_REFS = ("main", "afengler.tutorials")
+_REFS = ("main", "af-day3-final-cleanup")
 _RAW = "https://raw.githubusercontent.com/stefanradev93/sbi4cogsci/{ref}/tutorials/"
 
 
-def _fetch(module):
+def _fetch(path, dest=None):
+    """Download `path` (relative to `tutorials/`) to `dest`, default its basename."""
+    dest = dest or path.rsplit("/", 1)[-1]
     for ref in _REFS:
         try:
-            urllib.request.urlretrieve(_RAW.format(ref=ref) + module, module)
+            urllib.request.urlretrieve(_RAW.format(ref=ref) + path, dest)
             return ref
         except urllib.error.HTTPError:
             continue
-    raise RuntimeError(f"could not fetch {module} from any of {_REFS}")
+    raise RuntimeError(f"could not fetch {path} from any of {_REFS}")
 
 
 if IN_COLAB:
@@ -79,14 +81,24 @@ if IN_COLAB:
     # declares numba only as an optional extra, so pip leaves it in place and
     # any MvNormal (SolveTriangular has no C implementation) dies with
     # KeyError: "FunctionModel does not have a field named 'c_addr'".
+    # bayesflow pulls keras 3, which section 7 needs — without it the notebook
+    # dies at `import bayesflow` rather than anywhere informative.
     subprocess.run([sys.executable, "-m", "pip", "install", "-q",
-                    "numba>=0.61", "pymc>=6.2", "arviz>=1.2", "hssm>=0.4"],
+                    "numba>=0.61", "pymc>=6.2", "arviz>=1.2", "hssm>=0.4",
+                    "bayesflow>=2.0"],
                    check=True)
     # `dot` is a system binary, not a Python package.
     subprocess.run(["apt-get", "-qq", "install", "-y", "graphviz"],
                    check=True)
     for _mod in ["sbi4cogsci_style.py"]:
         print(f"  fetched {_mod} from {_fetch(_mod)}")
+    # Section 7 LOADS a trained network rather than training one. Skip this and
+    # `CKPT.exists()` is False on Colab, so that cell silently drops into its
+    # training branch — 150 epochs x 300 batches, roughly 25 minutes.
+    pathlib.Path("checkpoints").mkdir(exist_ok=True)
+    _ck = "day3_sbi_tools/checkpoints/ddm_nre.keras"
+    print(f"  fetched ddm_nre.keras from "
+          f"{_fetch(_ck, 'checkpoints/ddm_nre.keras')}")
     print("Colab setup done.")
 
 # %%
@@ -129,13 +141,12 @@ print("hssm", hssm.__version__, "|", len(hssm.list_models()), "built-in models")
 # with $z$ and $t$ fixed. **Difficulty acts on the drift** — a harder stimulus
 # supplies weaker evidence — and **theta acts on the boundary**.
 #
-# That assignment is a modelling claim, not a convenience, and it is worth two
-# sentences. It matches the finding the `cavanagh_theta` dataset is famous for:
-# mediofrontal theta tracks the **decision threshold**, not the rate of evidence
-# accumulation. It also makes the two manipulations *visibly different*: drift
-# moves accuracy and RT together, boundary trades them off. You will see exactly
-# that in the fit checks below, and the exercise at the end asks what happens
-# when you assign them the other way round.
+# That assignment is a modelling claim, not a convenience. It matches what
+# `cavanagh_theta` is famous for — mediofrontal theta tracks the **decision
+# threshold**, not the rate of evidence accumulation — and it makes the two
+# manipulations *visibly different*: drift moves accuracy and RT together,
+# boundary trades them off. The exercise at the end asks what happens if you
+# swap them.
 
 # %%
 N_TRIALS = 1200
@@ -190,7 +201,7 @@ print(f"\n{len(data)} trials | error rate {(data['response'] == -1).mean():.1%}"
 
 # %% [markdown]
 # <details class="sbi-key" open>
-# <summary>🔑 <b>Response coding in HSSM is <code>-1</code> / <code>+1</code></b></summary>
+# <summary>🔑 <b>Response coding in HSSM</b></summary>
 #
 # Two-choice models expect responses coded `-1` and `+1`. You never have to
 # guess this — every model declares it:
@@ -303,18 +314,6 @@ fig.tight_layout()
 # the **log** scale you can see what it actually does: it holds the density up
 # off zero everywhere, so no single trial can contribute an unboundedly large
 # negative log-likelihood.
-#
-# <details class="sbi-warn" open>
-# <summary>⚠️ <b>What the lapse process is, and is not</b></summary>
-#
-# It is a **robustifying floor**, not a generative model of lapses. Two things
-# follow. First, the lapse density in HSSM depends only on the RT and ignores
-# the choice, so over the joint (rt, choice) space the implemented mixture does
-# not integrate to one. Second, `p_outlier` is fixed by default rather than
-# estimated — it is a modelling assumption you are making, so **report it**.
-# Turn it off with `p_outlier=None` when you want the pure SSM.
-#
-# </details>
 
 # %% [markdown]
 # ## 4. Fit checks that are specific to SSMs
@@ -329,8 +328,12 @@ fig.tight_layout()
 
 # %%
 model_flat.sample_posterior_predictive(kind="response", draws=100)
-model_flat.plot_quantile_probability(cond="cond", predictive_style="ellipse",
-                                     ellipse_confidence=0.95)
+ax = model_flat.plot_quantile_probability(cond="cond", predictive_style="ellipse",
+                                          ellipse_confidence=0.95)
+# The method returns its Axes, so the y-limits are yours to set. Do set them:
+# the default view clips to the observed quantiles, which slices the tops off
+# the predictive ellipses and hides exactly the misfit you are looking for.
+ax.set_ylim(0, 5)
 plt.gcf().set_size_inches(7.5, 4.5)
 plt.gcf().suptitle("Flat model — one drift, one boundary", y=1.02)
 plt.tight_layout()
@@ -339,14 +342,22 @@ plt.tight_layout()
 # The **model cartoon** draws the fitted process itself: boundaries, start
 # point, drift and non-decision time, with the observed RT histograms mirrored
 # above and below.
+#
+# Two arguments make it show *uncertainty* rather than a single tidy summary.
+# `plot_predictive_samples=True` draws one boundary-and-drift sketch per
+# posterior draw, so the grey fan is the posterior on the parameters;
+# `n_trajectories` overlays actual simulated paths. The mean drift is not what
+# any single trial does.
 
 # %%
-hssm.plotting.plot_model_cartoon(model_flat, n_samples=5)
+hssm.plotting.plot_model_cartoon(model_flat, n_samples=20,
+                                 plot_predictive_samples=True,
+                                 n_trajectories=3)
 plt.gcf().set_size_inches(7.5, 4)
 plt.tight_layout()
 
 # %% [markdown]
-# ## 5. The model the data deserves
+# ## 5. A more accurate model
 #
 # The flat model has one drift and one boundary for every trial, but we built
 # this dataset so that drift depends on `cond` and boundary tracks `theta`.
@@ -373,8 +384,9 @@ print("\nTRUE:", {k: v for k, v in TRUE.items()})
 
 # %%
 model_reg.sample_posterior_predictive(kind="response", draws=100)
-model_reg.plot_quantile_probability(cond="cond", predictive_style="ellipse",
-                                    ellipse_confidence=0.95)
+ax = model_reg.plot_quantile_probability(cond="cond", predictive_style="ellipse",
+                                         ellipse_confidence=0.95)
+ax.set_ylim(0, 5)          # same y-range as the flat model, so the two compare
 plt.gcf().set_size_inches(7.5, 4.5)
 plt.gcf().suptitle("Regression model — drift ~ condition, boundary ~ theta", y=1.02)
 plt.tight_layout()
@@ -382,30 +394,24 @@ plt.tight_layout()
 # %% [markdown]
 # ### How to read a quantile probability plot
 #
-# This is the standard fit check for sequential-sampling models, and it is worth
-# learning to read properly because it shows accuracy and RT *at the same time*.
+# The standard fit check for sequential-sampling models, and worth learning to
+# read properly because it shows accuracy and RT *at the same time*.
 #
 # - **Horizontal axis** — the proportion of responses in that group. Each
-#   condition contributes **two** points: its errors on the left, its correct
-#   responses on the right, mirrored about 0.5.
-# - **Vertical axis** — RT quantiles. The three lines are the 25th, 50th and
-#   75th percentiles, so the vertical spread *is* the shape of the RT
-#   distribution.
+#   condition contributes **two** points: errors on the left, correct responses
+#   on the right, mirrored about 0.5.
+# - **Vertical axis** — the 25th, 50th and 75th RT percentiles, so the vertical
+#   spread *is* the shape of the RT distribution.
 # - **Ellipses** — the posterior predictive. The model fits where they cover the
 #   observed points.
 #
-# So the four x-positions read outward from the centre as: hard errors, hard
-# correct, easy errors, easy correct. **Because difficulty acts on the drift,
-# the conditions land at genuinely different proportions** — easy near 0.14 and
-# 0.86, hard near 0.36 and 0.64 — which is what gives the plot its
-# characteristic inverted-U and makes the fit checkable at all.
-#
-# Compare it with the flat model's plot above: that one collapses both
-# conditions onto a single pair of positions, because a single drift cannot
-# produce two accuracies.
+# The four x-positions read outward from the centre as: hard errors, hard
+# correct, easy errors, easy correct. Compare it with the flat model above,
+# which collapses both conditions onto a single pair of positions — a single
+# drift cannot produce two accuracies.
 #
 # <details class="sbi-tip">
-# <summary>💡 <b>This is the whole argument for HSSM</b></summary>
+# <summary>💡 <b>This is the key argument for HSSM</b></summary>
 #
 # `include=[{"name": "v", "formula": "v ~ 1 + C(cond)"}]` replaced the
 # `v[coh_idx]` indexing you wrote by hand yesterday — and it extends to random
@@ -455,7 +461,7 @@ plt.tight_layout()
 # </details>
 
 # %% [markdown]
-# ## 6. *Optional* — hierarchical regression
+# ## 6. Hierarchical regression
 #
 # Real designs have participants. HSSM takes bambi's random-effects syntax
 # directly, so a participant-level drift intercept is `(1|participant_id)`.
@@ -488,220 +494,360 @@ print(az.summary(model_hier.traces,
 # The geometry of that `sigma` parameter is what the 11:00 session is about.
 
 # %% [markdown]
-# ## 7. *Optional* — bring your own likelihood
+# A **forest plot** is the natural summary for a hierarchical fit: every
+# coefficient on one axis, with intervals you can scan for overlap with zero.
 #
-# The likelihood does not have to be one of HSSM's. Anything you can write as a
-# **JAX function** works, which is the route to models HSSM has never heard of.
-#
-# The contract: `f(data_i, *params) -> scalar`, where `data_i` is one trial's
-# `[rt, choice]`. HSSM `vmap`s it over trials and differentiates it for you.
-#
-# As a stand-in for a trained network, here is a hand-written surrogate — a
-# lognormal RT crossed with a biased choice:
-#
-# $$
-# \text{rt}_i \sim \text{LogNormal}\!\big(\mu(v,a,t),\ \sigma\big), \qquad
-# \mu = \log a - \log(v^2 + \tfrac14) + t,
-# $$
-# $$
-# P(\text{choice} = +1) = \operatorname{logit}^{-1}\!\big(2va + 4(z - \tfrac12)\big).
-# $$
-#
-# Both the location of the RT distribution and the choice probability depend on
-# the parameters, so all four are doing something.
+# One filter first. A fitted posterior can hold two kinds of variable: a handful
+# of **coefficients**, and — depending on the model — deterministics carrying
+# *one entry per trial*. Hand the second kind to `plot_forest` and it will
+# dutifully draw thousands of rows. Select on the dimensions, not by listing
+# names that go stale the moment you edit a formula:
 
 # %%
-import jax.numpy as jnp
-from functools import partial
-from hssm.config import ModelConfig
-from ssms.hssm_support import decorate_atomic_simulator, hssm_sim_wrapper
+post = model_hier.traces.posterior
+n_obs = len(data)
 
-SIGMA = 0.45
-
-
-def surrogate_logp(data, v, a, z, t):
-    """Single-trial log density of the surrogate above."""
-    # Force scalars. HSSM hands regression-capable parameters through as
-    # length-1 arrays; returning a (1,) instead of a () silently multiplies the
-    # total log-likelihood by the number of observations.
-    v, a, z, t = (jnp.reshape(p, ()) for p in (v, a, z, t))
-    rt, ch = data[0], data[1]
-
-    mu = jnp.log(a) - jnp.log(v**2 + 0.25) + t
-    log_rt = jnp.log(jnp.maximum(rt, 1e-6))
-    logp_rt = (-log_rt - jnp.log(SIGMA) - 0.5 * jnp.log(2 * jnp.pi)
-               - 0.5 * ((log_rt - mu) / SIGMA) ** 2)
-
-    drive = 2.0 * v * a + 4.0 * (z - 0.5)
-    p_up = 1.0 / (1.0 + jnp.exp(-drive))
-    logp_ch = jnp.where(ch > 0, jnp.log(p_up), jnp.log1p(-p_up))
-    return logp_rt + logp_ch
-
-
-def surrogate_sim(theta, model=None, n_samples=1, random_state=None, **kwargs):
-    """The generative twin of `surrogate_logp` — same maths, forwards."""
-    rng = np.random.default_rng(random_state)
-    theta = np.atleast_2d(np.asarray(theta, dtype=np.float64))
-    v, a, z, t = theta[:, 0], theta[:, 1], theta[:, 2], theta[:, 3]
-    mu = np.log(a) - np.log(v**2 + 0.25) + t
-    p_up = 1.0 / (1.0 + np.exp(-(2.0 * v * a + 4.0 * (z - 0.5))))
-    shape = (n_samples, theta.shape[0])
-    rts = np.exp(rng.normal(mu, SIGMA, size=shape))[..., None].astype(np.float32)
-    ch = np.where(rng.random(shape) < p_up, 1, -1)[..., None].astype(np.int32)
-    if n_samples == 1:
-        rts, ch = rts[0], ch[0]
-    return {"rts": rts, "choices": ch}
-
-
-# Wrapping the simulator so HSSM can use it as the model's random variable.
-surrogate_rv = decorate_atomic_simulator(
-    model_name="surrogate", choices=[-1, 1], obs_dim=2
-)(partial(hssm_sim_wrapper, simulator_fun=surrogate_sim, model="surrogate"))
-
-surrogate_cfg = ModelConfig(
-    response=["rt", "response"],
-    list_params=["v", "a", "z", "t"],
-    choices=(-1, 1),
-    bounds={"v": (-3.0, 3.0), "a": (0.3, 2.5), "z": (0.1, 0.9), "t": (0.0, 1.0)},
-    backend="jax",
-    rv=surrogate_rv,          # <- without this there is no posterior predictive
-)
-
-# %% [markdown]
-# Simulate from it at known parameters, then try to recover them.
+coef_vars = [
+    v for v in post.data_vars
+    # keep anything with no trial-sized axis
+    if not any(post[v].sizes[d] == n_obs for d in post[v].dims)
+]
+print(f"{len(post.data_vars)} posterior variables -> {len(coef_vars)} coefficients")
+print("dropped:", sorted(set(post.data_vars) - set(coef_vars)) or "nothing (this model stores only coefficients)")
 
 # %%
-TRUE_SUR = dict(v=0.9, a=1.3, z=0.5, t=0.3)
-sur_data = pd.DataFrame(
-    surrogate_rv(theta=np.tile([TRUE_SUR[p] for p in PARAMS], (1500, 1)),
-                 n_replicas=1, random_state=RANDOM_SEED),
-    columns=["rt", "response"])
-
-model_sur = hssm.HSSM(data=sur_data, model="surrogate", model_config=surrogate_cfg,
-                      loglik=surrogate_logp, loglik_kind="approx_differentiable",
-                      p_outlier=0)
-model_sur.sample(sampler="numpyro", draws=500, tune=500, chains=2, cores=1,
-                 random_seed=RANDOM_SEED, progressbar=False)
-print(az.summary(model_sur.traces, var_names=PARAMS, kind="stats").to_string())
-print("\nTRUE:", TRUE_SUR)
-
-# %%
-po = model_sur.traces.posterior
-v_, a_, z_, t_ = (po[p].values.ravel() for p in PARAMS)
-mu_post = np.log(a_) - np.log(v_**2 + 0.25) + t_
-drive_post = 2 * v_ * a_ + 4 * (z_ - 0.5)
-mu_true = np.log(1.3) - np.log(0.9**2 + 0.25) + 0.3
-drive_true = 2 * 0.9 * 1.3 + 4 * (0.5 - 0.5)
-
-fig, axes = plt.subplots(1, 2, figsize=(11, 3.6))
-for ax, vals, truth, name in [(axes[0], mu_post, mu_true, r"$\mu$ (RT location)"),
-                              (axes[1], drive_post, drive_true, "choice drive")]:
-    ax.hist(vals, bins=60, density=True, color=S.PRIMARY, alpha=0.85)
-    S.truth_line(ax, truth, axis="x")
-    ax.set(title=name, ylabel="density")
-    ax.legend()
+az.plot_forest(model_hier.traces, var_names=coef_vars, combined=True)
+fig = plt.gcf()
+for ax in fig.axes:                    # a zero line to read "overlaps zero" off
+    ax.axvline(0.0, color="0.4", ls=":", lw=1)
+fig.suptitle("Hierarchical fit — all coefficients", y=1.01)
 fig.tight_layout()
 
 # %% [markdown]
-# The individual parameters are recovered only loosely, and the two derived
-# quantities above show why: the data constrain the RT **location** $\mu$ and
-# the **choice drive**, and several $(v, a, z, t)$ combinations give the same
-# pair. That is the identifiability lesson from yesterday afternoon, arriving
-# uninvited in a model we wrote ourselves.
+# For *this* model the filter drops nothing: HSSM keeps the per-trial parameter
+# values out of the posterior group and stores only the coefficients. Write the
+# filter anyway — it costs three lines, and the moment you add a parameter that
+# HSSM does store per trial, an unfiltered `plot_forest` is a figure with one
+# row per trial.
+
+# %% [markdown]
+# ## 7. Bring your own likelihood — learned from a simulator
 #
-# Because we attached `rv=`, posterior predictive sampling works too:
+# Everything so far used a likelihood HSSM already had. For a model it has never
+# heard of you supply one, and the contract is small:
+#
+# > a JAX function `f(data_i, *params) -> scalar`, where `data_i` is one trial's
+# > `[rt, choice]`. HSSM `vmap`s it over trials and differentiates it for you.
+#
+# The interesting case is when there is no formula to write down — only a
+# **simulator**. Then you *learn* the likelihood. We do it for the **plain DDM**
+# on purpose: HSSM has the exact one, so we can grade the learned likelihood
+# against the truth — the check you will *not* have in a real application.
+
+# %% [markdown]
+# ### The simulator, and the box it defines
+#
+# `ssm-simulators` keeps its models in a registry that carries both the
+# parameter names and their supported ranges. Read them out rather than
+# hard-coding — those bounds become the region the network is valid in.
 
 # %%
-model_sur.sample_posterior_predictive(draws=100)
-pp = model_sur.traces["posterior_predictive"]["rt,response"].values
-print(f"predicted mean rt {pp[..., 0].mean():.3f} (observed {sur_data.rt.mean():.3f})")
-print(f"predicted P(+1)   {(pp[..., 1] > 0).mean():.3f} "
-      f"(observed {(sur_data.response > 0).mean():.3f})")
+import jax
+import jax.numpy as jnp
+from functools import partial
+from ssms.basic_simulators.simulator import simulator
+from ssms.config import model_config
+from ssms.hssm_support import decorate_atomic_simulator, hssm_sim_wrapper
+
+SIM_MODEL = "ddm"
+_cfg = model_config[SIM_MODEL]
+SIM_PARAMS = list(_cfg["params"])
+BOX_LO = np.array(_cfg["param_bounds"][0], dtype=float)
+BOX_HI = np.array(_cfg["param_bounds"][1], dtype=float)
+
+print(f"{SIM_MODEL}: {SIM_PARAMS}")
+for p, lo, hi in zip(SIM_PARAMS, BOX_LO, BOX_HI):
+    print(f"  {p}: [{lo:5.2f}, {hi:5.2f}]")
 
 # %% [markdown]
-# ## 8. *Optional* — a likelihood learned by BayesFlow
+# Now a dataset at known parameters. Note the **theta-shape rule** from
+# yesterday's simulation session: a *matrix* of thetas with `n_samples=1` gives
+# one trial per row, which is exactly the shape a likelihood learner wants.
+
+# %%
+TRUE_SIM = dict(v=0.9, a=1.3, z=0.5, t=0.3)
+N_TRIALS = 1500
+
+_out = simulator(theta=np.tile([TRUE_SIM[p] for p in SIM_PARAMS], (N_TRIALS, 1)),
+                 model=SIM_MODEL, n_samples=1, random_state=RANDOM_SEED)
+sim_data = pd.DataFrame({"rt": _out["rts"].reshape(-1).astype(float),
+                         "response": _out["choices"].reshape(-1).astype(float)})
+print(sim_data.head(3).to_string(index=False))
+print(f"\n{len(sim_data)} trials   P(+1) = {(sim_data.response > 0).mean():.3f}"
+      f"   rt in [{sim_data.rt.min():.2f}, {sim_data.rt.max():.2f}]")
+
+# %% [markdown]
+# ### Training it
 #
-# The surrogate above was hand-written. In practice you would **train** one:
-# simulate from a model that has no closed-form likelihood, learn the density
-# with a normalizing flow, and hand the trained network to HSSM as the same
-# kind of JAX callable.
+# The simulator is fast and vectorized, so we train **online** — a fresh batch
+# of $(\theta, x)$ pairs at every step, so the network never sees the same draw
+# twice and there is nothing to overfit.
 #
-# The full recipe is below. It trains in about a minute; in a real project you
-# would train once and save the network.
+# This takes about twenty minutes, so the notebook **loads the network committed
+# to this repository** if it finds one. Set `FORCE_TRAIN = True` to retrain.
+
+# %%
+import os
+# Must be set BEFORE keras is first imported, and must be jax: the likelihood
+# has to be traceable by the sampler. (Nothing above imports keras, so this
+# cell is still early enough.)
+os.environ["KERAS_BACKEND"] = "jax"
+
+import keras
+import bayesflow as bf
+import pytensor
+import pytensor.tensor as pt
+from hssm.likelihoods.analytical import logp_ddm
+
+FORCE_TRAIN = False
+CKPT = pathlib.Path("checkpoints/ddm_nre.keras")
+
+# Sizes follow BayesFlow's own examples/Ratio_Estimation.ipynb, which builds an
+# NRE for this very model: a 3x256 MLP, K about half the batch, and a cosine
+# decayed learning rate spanning the whole run.
+EPOCHS, NUM_BATCHES, BATCH, K = 150, 300, 128, 64
+
+
+def nre_sample_fn(batch_shape):
+    """One fresh simulated trial per theta. x = [log rt, choice]."""
+    n = int(np.prod(batch_shape))
+    th = rng.uniform(BOX_LO, BOX_HI, size=(n, len(SIM_PARAMS)))
+    out = simulator(theta=th, model=SIM_MODEL, n_samples=1,
+                    random_state=int(rng.integers(2**31)))
+    rt = out["rts"].reshape(-1).astype(np.float64)
+    ch = out["choices"].reshape(-1).astype(np.float64)
+    return {"theta": th.astype("float32"),
+            "x": np.stack([np.log(rt), ch], -1).astype("float32")}
+
+
+if CKPT.exists() and not FORCE_TRAIN:
+    # NOTE: bayesflow must be imported before this, so its @serializable classes
+    # are registered — otherwise the load fails with
+    # "Could not locate class 'RatioApproximator'".
+    approx = keras.saving.load_model(CKPT)
+    print(f"loaded trained network from {CKPT}")
+else:
+    approx = bf.approximators.RatioApproximator(
+        inference_network=bf.networks.MLP(widths=(256,) * 3),
+        adapter=bf.approximators.RatioApproximator.build_adapter(
+            inference_variables=["theta"],     # NRE contrasts THETA...
+            inference_conditions=["x"]),       # ...against a fixed x
+        standardize=["inference_variables", "inference_conditions"],
+        K=K, gamma=1.0)
+    approx.compile(optimizer=keras.optimizers.Adam(
+        learning_rate=keras.optimizers.schedules.CosineDecay(
+            5e-4, decay_steps=EPOCHS * NUM_BATCHES)))
+    approx.fit(simulator=bf.simulators.LambdaSimulator(nre_sample_fn, is_batched=True),
+               epochs=EPOCHS, num_batches=NUM_BATCHES, batch_size=BATCH, verbose=2)
+    CKPT.parent.mkdir(parents=True, exist_ok=True)
+    approx.save(CKPT)
+
+# %% [markdown]
+# ### From network to likelihood
 #
-# ```python
-# import os
-# os.environ["KERAS_BACKEND"] = "jax"       # BEFORE importing keras / bayesflow
-# import bayesflow as bf
+# The trained ratio is `projector(classifier(...))` applied to the
+# concatenated, standardized $(\theta, x)$. Written as a JAX function of a
+# single trial, that is precisely HSSM's `loglik` contract:
+
+# %%
+_classifier, _projector = approx.inference_network, approx.projector
+_std = approx.standardizer
+
+
+def nre_logp(data, v, a, z, t):
+    """log p(x|theta)/p(x) for a single trial."""
+    v, a, z, t = (jnp.reshape(p, ()) for p in (v, a, z, t))
+    rt, ch = data[0], data[1]
+    theta = jnp.stack([v, a, z, t])
+    x = jnp.stack([jnp.log(jnp.maximum(rt, 1e-6)), ch])   # same transform as training
+    theta = _std.maybe_standardize(theta, key="inference_variables")
+    x = _std.maybe_standardize(x, key="inference_conditions")
+    return jnp.squeeze(_projector(_classifier(jnp.concatenate([theta, x])[None, :])))
+
+# %% [markdown]
+# ### Registering it
 #
-# # 1. simulate training data across the parameter box you want to support
-# LOW  = np.array([-2.5, 0.5, 0.3, 0.0])    # this box IS the network's validity region
-# HIGH = np.array([ 2.5, 2.0, 0.7, 1.0])
-# theta = rng.uniform(LOW, HIGH, size=(4000, 4))
-# out = simulator(theta=theta, model="ddm", n_samples=10, random_state=0)
+# Everything the model *is* — its response columns, its parameters, its
+# density, its simulator, its validity box — goes in **one call**. After it,
+# `"ddm_nre"` is a model name like `"ddm"`.
+
+# %%
+# Two ssm-simulators helpers, doing two different jobs:
 #
-# # 2. train a coupling flow to learn p(rt, choice | theta)
-# workflow = bf.BasicWorkflow(
-#     inference_network=bf.networks.CouplingFlow(depth=6),
-#     standardize=None,                     # load-bearing — see below
-#     ...)
-# workflow.fit_offline({"inference_variables": x, "inference_conditions": theta_n},
-#                      epochs=60)
+#   hssm_sim_wrapper          adapts the call signature. HSSM invokes a simulator
+#                             as f(theta, n_replicas, random_state); ssms wants
+#                             f(theta, model, n_samples, ...). `partial` pins the
+#                             model name and the wrapper bridges the rest.
+#   decorate_atomic_simulator attaches metadata. It sets three attributes on the
+#                             function — model_name, choices, obs_dim — and does
+#                             nothing else. HSSM reads them to name the random
+#                             variable and to learn the response coding and how
+#                             many columns a trial has. Omit it and you get
+#                             "ValueError: The simulator function must have a
+#                             `model_name` attribute."
+nre_rv = decorate_atomic_simulator(
+    model_name=SIM_MODEL, choices=[-1, 1], obs_dim=2
+)(partial(hssm_sim_wrapper, simulator_fun=simulator, model=SIM_MODEL))
+
+hssm.defaults.default_model_config.pop("ddm_nre", None)   # make the cell re-runnable
+
+hssm.register_model(
+    name="ddm_nre",
+    response=["rt", "response"],
+    list_params=SIM_PARAMS,
+    choices=[-1, 1],
+    description="A DDM whose likelihood was learned from simulations by a "
+                "BayesFlow ratio estimator.",
+    likelihoods={
+        "approx_differentiable": {
+            "loglik": nre_logp,
+            "backend": "jax",
+            "rv": nre_rv,        # <- without this there is no posterior predictive
+            # The training box, not a modelling preference. Outside it the
+            # network extrapolates and returns confident nonsense.
+            "bounds": dict(zip(SIM_PARAMS, zip(BOX_LO.tolist(), BOX_HI.tolist()))),
+        }
+    },
+)
+
+# %% [markdown]
+# Declaring the density and the *kind* of density together, in the place that
+# describes the model, is the point — passing `loglik=` and `loglik_kind=` to
+# the `HSSM(...)` call splits one fact across two places and lets them disagree.
 #
-# # 3. the trained flow's log_prob IS a JAX function
-# net = workflow.approximator.inference_network
-#
-# def trained_logp(data, v, a, z, t):
-#     theta_n = normalise(jnp.stack([v, a, z, t]))
-#     x = jnp.stack([standardise_rt(data[0]), data[1]])
-#     return net.log_prob(x[None, :], conditions=theta_n[None, :])[0]
-#
-# # 4. hand it to HSSM exactly like the surrogate above
-# hssm.HSSM(data=..., model="learned", model_config=cfg,
-#           loglik=trained_logp, loglik_kind="approx_differentiable")
-#
-# # 5. save it so you never train twice
-# workflow.approximator.save("ddm_nle.keras")     # ~4 MB, reloads in under a second
-# ```
-#
+# Now fit it, and fit the analytic DDM on the same data to grade against.
+
+# %%
+model_nre = hssm.HSSM(data=sim_data, model="ddm_nre", p_outlier=0)
+model_nre.sample(sampler="numpyro", draws=500, tune=500, chains=2, cores=1,
+                 random_seed=RANDOM_SEED, progressbar=False)
+
+model_exact = hssm.HSSM(data=sim_data, model="ddm", p_outlier=0)
+model_exact.sample(sampler="numpyro", draws=500, tune=500, chains=2, cores=1,
+                   random_seed=RANDOM_SEED, progressbar=False)
+
+print("LEARNED (NRE)")
+print(az.summary(model_nre.traces, var_names=SIM_PARAMS, kind="stats").to_string())
+print("\nEXACT (analytic WFPT)")
+print(az.summary(model_exact.traces, var_names=SIM_PARAMS, kind="stats").to_string())
+print("\nTRUE:", TRUE_SIM)
+
+# %% [markdown]
 # <details class="sbi-warn" open>
-# <summary>⚠️ <b>Three traps on this route, all silent</b></summary>
+# <summary>⚠️ <b><code>p_outlier</code> must be 0 with a ratio estimator</b></summary>
 #
-# **Use `approximator.inference_network.log_prob`, not
-# `approximator.log_prob`.** The latter is the documented user-facing call and
-# is *not* JAX-traceable — it converts to numpy internally and dies under
-# `jit`/`grad` with a `TracerArrayConversionError`.
+# HSSM's lapse process mixes the likelihood with a uniform density:
+# $(1-p)\,\mathcal{L} + p\,\mathcal{U}$. That addition needs $\mathcal{L}$ on a
+# genuine probability scale, and a ratio is only defined up to the factor
+# $p(x)$ — so the mixture weights the two terms wrongly, silently, because
+# nothing about the arithmetic fails.
 #
-# **Set `standardize=None`.** With BayesFlow's default the raw network log-density
-# is missing the standardization and its log-determinant, so the likelihood is
-# wrong by a data-dependent amount, with no error.
-#
-# **The training box is the validity region.** Outside it the network
-# extrapolates and returns confident nonsense. Set `bounds` in the `ModelConfig`
-# to the box you trained on, and keep priors inside it.
+# The same rules out anything else reading the likelihood as an absolute
+# quantity: `az.loo`, `az.waic`, and Bayes factors across separately-trained
+# networks.
 #
 # </details>
 
 # %% [markdown]
-# ## What to take away
+# Read the two summaries together and note **both** things. The interval
+# *widths* agree with the exact fit — the learned likelihood is not pretending
+# to know more than the data support, which is the failure mode to fear. But
+# `v` carries a small bias beyond the exact fit's own. That is the trade: a
+# likelihood for a model you could only simulate, at the cost of a bias you can
+# measure but not remove.
+
+# %%
+fig, axes = plt.subplots(1, 4, figsize=(13, 3.1))
+for ax, p in zip(axes, SIM_PARAMS):
+    for tr, colour, lbl in [(model_exact.traces, S.PRIMARY, "exact (WFPT)"),
+                            (model_nre.traces, S.NAIVE, "learned (NRE)")]:
+        ax.hist(tr.posterior[p].values.ravel(), bins=40, density=True,
+                color=colour, alpha=0.55, label=lbl)
+    S.truth_line(ax, TRUE_SIM[p], axis="x")
+    ax.set(title=p, yticks=[])
+axes[0].legend(fontsize=7)
+fig.suptitle("Exact vs. learned likelihood — same data, same model", y=1.04)
+fig.tight_layout()
+
+# %% [markdown]
+# ### Did the sampler behave?
 #
-# <details class="sbi-tip">
-# <summary>💡 <b>The five things that matter</b></summary>
+# Same checks as for any other model — a learned likelihood buys no exemption.
+
+# %%
+az.plot_trace_dist(model_nre.traces, var_names=SIM_PARAMS, combined=False)
+plt.gcf().set_size_inches(9, 6)
+plt.tight_layout()
+
+# %% [markdown]
+# And the pair plot, which is where a custom likelihood usually confesses.
+# Divergences are drawn on top: if they pile up in one region rather than
+# scattering, the geometry there is the problem, not the sampler.
+
+# %%
+# ArviZ 1.x styles sub-plots through `visuals`, and divergences are OFF by
+# default — you have to ask for them.
+az.plot_pair(model_nre.traces, var_names=SIM_PARAMS,
+             marginal=True, marginal_kind="kde",
+             visuals={"divergence": True, "scatter": {"alpha": 0.1}})
+plt.gcf().set_size_inches(7.5, 7.5)
+plt.tight_layout()
+
+print("divergences — learned:",
+      int(model_nre.traces.sample_stats["diverging"].values.sum()),
+      "  exact:", int(model_exact.traces.sample_stats["diverging"].values.sum()))
+
+# %% [markdown]
+# ### Posterior predictive
 #
-#
-# 1. **HSSM is bambi for cognitive models.** A formula per *SSM parameter*,
-#    instead of `v[coh_idx]` by hand.
-# 2. **`print(model)` and `model.graph()` before you sample.** They resolve every
-#    prior, bound, link and the lapse process.
-# 3. **`p_outlier` is on by default at 0.05.** It is a robustifying floor on the
-#    likelihood, it is a modelling assumption, and you should report it.
-# 4. **Check the fit with SSM-specific plots** — quantile probability and the
-#    model cartoon — not just traces.
-# 5. **Any JAX function can be the likelihood.** Attach an `rv=` too, or you
-#    lose posterior predictive sampling.
-#
-# </details>
-#
+# Because we attached `rv=`, the learned model can simulate as well as score.
+
+# %%
+model_nre.sample_posterior_predictive(draws=100)
+pp = model_nre.traces["posterior_predictive"]["rt,response"].values
+pp = pp.reshape(-1, pp.shape[-2], 2)        # (n_replicates, n_trials, [rt, choice])
+print(f"{pp.shape[0]} replicate datasets of {pp.shape[1]} trials")
+
+# %% [markdown]
+# Plot the **whole predictive distribution**, letting each posterior draw
+# contribute its own replicate — the spread of the thin lines *is* the model's
+# uncertainty, which a single mean prediction hides.
+
+# %%
+fig, ax1 = plt.subplots(figsize=(6.5, 4))
+
+# defective RT densities, one thin line per replicate
+bins = np.linspace(0, 4, 50)
+ctr = 0.5 * (bins[:-1] + bins[1:])
+width = np.diff(bins)[0]
+for sign, colour, lbl in [(1, S.PRIMARY, "choice +1"), (-1, S.NAIVE, "choice -1")]:
+    for rep in pp[:60]:
+        m = rep[:, 1] == sign
+        # normalise by ALL trials, not just this choice's, so the two curves
+        # keep their relative mass -- that is what makes it a *defective*
+        # density, showing choice proportion and RT at once.
+        h, _ = np.histogram(rep[m, 0], bins=bins)
+        ax1.plot(ctr, h / (len(rep) * width), color=colour, alpha=0.12, lw=0.8)
+    m = sim_data.response.to_numpy() == sign
+    h, _ = np.histogram(sim_data.rt.to_numpy()[m], bins=bins)
+    ax1.plot(ctr, h / (len(sim_data) * width), color=colour, lw=2.5,
+             label=f"{lbl} (data)")
+ax1.set(xlabel="rt (s)", ylabel="defective density",
+        title="Predictive RT distributions\n(thin = one posterior draw)")
+ax1.legend(fontsize=8)
+fig.tight_layout()
+
+# %% [markdown]
 # ### Quick reference
 #
 # | want to | call |
@@ -715,7 +861,10 @@ print(f"predicted P(+1)   {(pp[..., 1] > 0).mean():.3f} "
 # | SSM fit check | `model.plot_quantile_probability(cond=..., predictive_style="ellipse")` |
 # | see the process | `hssm.plotting.plot_model_cartoon(model)` |
 # | known-truth data | `model.sample_do({...}, draws=1)` |
-# | your own likelihood | `loglik=<jax fn>`, `loglik_kind="approx_differentiable"`, `rv=<sim>` |
+# | a simulator's parameters and bounds | `ssms.config.model_config["ddm"]` |
+# | one trial per parameter row | `simulator(theta=<matrix>, model="ddm", n_samples=1)` |
+# | your own likelihood | `hssm.register_model(name=..., likelihoods={"approx_differentiable": {"loglik": <jax fn>, "backend": "jax", "rv": <sim>, "bounds": ...}})` |
+# | learn one from simulations | `bf.approximators.RatioApproximator` (NRE) |
 #
 # **Next, at 11:00:** the `sigma` in `(1|participant_id)` has a posterior
 # geometry that will break your sampler if you let it.

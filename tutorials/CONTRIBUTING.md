@@ -61,4 +61,10 @@ optional layer — adopt any, none, or all. Use your own stack.
   key and a public URL — the repo is public, so a `_` file is still readable
   on GitHub. If students must not see it at all before the session, keep it
   off `main` until afterwards.
-- Don't commit `.venv/`, `data/`, checkpoints, `__marimo__/` (gitignored).
+- Don't commit `.venv/`, `data/`, `__marimo__/` (gitignored).
+- **Trained networks are the exception** — commit them. A notebook that trains
+  a network at run time is unusable in a session, so the small ones are checked
+  in and loaded by default: `day3_sbi_tools/checkpoints/ddm_nre.keras` (1.7 MB)
+  and `day4_complex_joint/checkpoints/compositional.keras` (3.0 MB). Nothing
+  gitignores `checkpoints/`, so `git add` them deliberately and keep them under
+  the size limit in rule 5.

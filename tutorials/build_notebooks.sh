@@ -25,8 +25,8 @@ cd "$(dirname "$0")"
 
 sources=("$@")
 if [ ${#sources[@]} -eq 0 ]; then
-  # `_src/` also holds build helpers (precompute_ddm_grid.py,
-  # bake_slide_figures.py) that jupytext must not touch, and tutorials/ holds a
+  # `_src/` also holds build helpers (precompute_ddm_grid.py) that jupytext
+  # must not touch, and tutorials/ holds a
   # marimo file (_molab_probe.py) it cannot read. Select on the jupytext
   # percent-format header rather than on the path, so this stays correct as
   # files are added.
