@@ -552,12 +552,10 @@ fig.tight_layout()
 # hard-coding — those bounds become the region the network is valid in.
 
 # %%
-import jax
 import jax.numpy as jnp
-from functools import partial
 from ssms.basic_simulators.simulator import simulator
 from ssms.config import model_config
-from ssms.hssm_support import decorate_atomic_simulator, hssm_sim_wrapper
+from ssms.hssm_support import get_simulator_fun_internal
 
 SIM_MODEL = "ddm"
 _cfg = model_config[SIM_MODEL]
@@ -593,8 +591,16 @@ print(f"\n{len(sim_data)} trials   P(+1) = {(sim_data.response > 0).mean():.3f}"
 # of $(\theta, x)$ pairs at every step, so the network never sees the same draw
 # twice and there is nothing to overfit.
 #
-# This takes about twenty minutes, so the notebook **loads the network committed
-# to this repository** if it finds one. Set `FORCE_TRAIN = True` to retrain.
+# One detail worth copying. BayesFlow's `make_simulator` wraps your function in a
+# `LambdaSimulator`, and by default (`is_batched=False`) it calls that function
+# **once per sample** and stacks the results. Passing `is_batched=True` lets us
+# hand `ssm-simulators` a whole theta *matrix* per step — the shape rule from
+# yesterday's session — which is **11x faster** here (2.5 ms vs 27.5 ms per batch
+# of 128). The published BayesFlow and HSSM examples use the per-trial form.
+#
+# Training takes about twenty minutes, so the notebook **loads the network
+# committed to this repository** if it finds one. Set `FORCE_TRAIN = True` to
+# retrain.
 
 # %%
 import os
@@ -605,9 +611,6 @@ os.environ["KERAS_BACKEND"] = "jax"
 
 import keras
 import bayesflow as bf
-import pytensor
-import pytensor.tensor as pt
-from hssm.likelihoods.analytical import logp_ddm
 
 FORCE_TRAIN = False
 CKPT = pathlib.Path("checkpoints/ddm_nre.keras")
@@ -647,8 +650,10 @@ else:
     approx.compile(optimizer=keras.optimizers.Adam(
         learning_rate=keras.optimizers.schedules.CosineDecay(
             5e-4, decay_steps=EPOCHS * NUM_BATCHES)))
-    approx.fit(simulator=bf.simulators.LambdaSimulator(nre_sample_fn, is_batched=True),
-               epochs=EPOCHS, num_batches=NUM_BATCHES, batch_size=BATCH, verbose=2)
+    history = approx.fit(
+        simulator=bf.make_simulator(nre_sample_fn, is_batched=True),
+        epochs=EPOCHS, num_batches=NUM_BATCHES, batch_size=BATCH, verbose=2)
+    bf.diagnostics.plots.loss(history)     # the one diagnostic NRE gets for free
     CKPT.parent.mkdir(parents=True, exist_ok=True)
     approx.save(CKPT)
 
@@ -657,22 +662,41 @@ else:
 #
 # The trained ratio is `projector(classifier(...))` applied to the
 # concatenated, standardized $(\theta, x)$. Written as a JAX function of a
-# single trial, that is precisely HSSM's `loglik` contract:
+# single trial, that is precisely HSSM's `loglik` contract.
+#
+# Write it as a **factory** that closes over the approximator, rather than as a
+# function reaching for module globals — that is the shape HSSM's own
+# `bayesflow_lre_integration.ipynb` tutorial uses, and it means you can hold two
+# trained networks at once without them colliding.
 
 # %%
-_classifier, _projector = approx.inference_network, approx.projector
-_std = approx.standardizer
+def make_jax_log_ratio_fn(approximator):
+    """Return f(obs_i, *params) -> scalar log-ratio, ready for HSSM."""
+    net, proj, std = (approximator.inference_network,
+                      approximator.projector,
+                      approximator.standardizer)
+
+    def single_trial_log_ratio(data, v, a, z, t):
+        theta = jnp.stack([jnp.reshape(p, ()) for p in (v, a, z, t)])
+        # same transform the network was trained on
+        x = jnp.stack([jnp.log(jnp.maximum(data[0], 1e-6)), data[1]])
+        theta = std.maybe_standardize(theta, key="inference_variables")
+        x = std.maybe_standardize(x, key="inference_conditions")
+        logits = proj(net(jnp.concatenate([theta, x])[None, :]))
+        return jnp.squeeze(logits).astype(jnp.float64)
+
+    return single_trial_log_ratio
 
 
-def nre_logp(data, v, a, z, t):
-    """log p(x|theta)/p(x) for a single trial."""
-    v, a, z, t = (jnp.reshape(p, ()) for p in (v, a, z, t))
-    rt, ch = data[0], data[1]
-    theta = jnp.stack([v, a, z, t])
-    x = jnp.stack([jnp.log(jnp.maximum(rt, 1e-6)), ch])   # same transform as training
-    theta = _std.maybe_standardize(theta, key="inference_variables")
-    x = _std.maybe_standardize(x, key="inference_conditions")
-    return jnp.squeeze(_projector(_classifier(jnp.concatenate([theta, x])[None, :])))
+nre_logp = make_jax_log_ratio_fn(approx)
+
+# %% [markdown]
+# BayesFlow ships this same function, if you would rather not write it:
+# `bayesflow.wrappers.pymc.NeuralDistribution(approx, param_names=[...])` exposes
+# it as `.backend.log_prob`, and wraps it as a `pm.CustomDist` for use in plain
+# PyMC. We build it by hand here because we want to hand the *function* to HSSM
+# and let HSSM add the parameter bounds, the non-decision-time guard and the
+# simulator — see the next cell.
 
 # %% [markdown]
 # ### Registering it
@@ -682,22 +706,13 @@ def nre_logp(data, v, a, z, t):
 # `"ddm_nre"` is a model name like `"ddm"`.
 
 # %%
-# Two ssm-simulators helpers, doing two different jobs:
-#
-#   hssm_sim_wrapper          adapts the call signature. HSSM invokes a simulator
-#                             as f(theta, n_replicas, random_state); ssms wants
-#                             f(theta, model, n_samples, ...). `partial` pins the
-#                             model name and the wrapper bridges the rest.
-#   decorate_atomic_simulator attaches metadata. It sets three attributes on the
-#                             function — model_name, choices, obs_dim — and does
-#                             nothing else. HSSM reads them to name the random
-#                             variable and to learn the response coding and how
-#                             many columns a trial has. Omit it and you get
-#                             "ValueError: The simulator function must have a
-#                             `model_name` attribute."
-nre_rv = decorate_atomic_simulator(
-    model_name=SIM_MODEL, choices=[-1, 1], obs_dim=2
-)(partial(hssm_sim_wrapper, simulator_fun=simulator, model=SIM_MODEL))
+# One call gives HSSM a usable random variable: it adapts the ssms simulator's
+# call signature and attaches the three attributes HSSM insists on —
+# `model_name`, `choices`, `obs_dim` — reading `choices` straight from the
+# ssm-simulators registry. (Build it by hand and forget the attributes and you
+# get "ValueError: The simulator function must have a `model_name` attribute.")
+nre_rv = get_simulator_fun_internal(SIM_MODEL)
+print("rv metadata:", nre_rv.model_name, nre_rv.choices, nre_rv.obs_dim)
 
 hssm.defaults.default_model_config.pop("ddm_nre", None)   # make the cell re-runnable
 
@@ -810,42 +825,55 @@ print("divergences — learned:",
 # %% [markdown]
 # ### Posterior predictive
 #
-# Because we attached `rv=`, the learned model can simulate as well as score.
+# Because the registry entry carries `rv=`, the learned model can **simulate**
+# as well as score — so HSSM's own plots work on it, unchanged. Note we never
+# call `sample_posterior_predictive`: the plot generates the draws it needs.
 
 # %%
-model_nre.sample_posterior_predictive(draws=100)
-pp = model_nre.traces["posterior_predictive"]["rt,response"].values
-pp = pp.reshape(-1, pp.shape[-2], 2)        # (n_replicates, n_trials, [rt, choice])
-print(f"{pp.shape[0]} replicate datasets of {pp.shape[1]} trials")
+model_nre.plot_predictive()
+plt.gcf().set_size_inches(7.5, 4)
+plt.gcf().suptitle("Learned likelihood — posterior predictive vs. data", y=1.02)
+plt.tight_layout()
 
 # %% [markdown]
-# Plot the **whole predictive distribution**, letting each posterior draw
-# contribute its own replicate — the spread of the thin lines *is* the model's
-# uncertainty, which a single mean prediction hides.
+# That is the whole point of registering the model properly rather than keeping
+# the network in a variable: the likelihood is learned, but everything
+# downstream — bounds, the lapse process, predictive sampling, the plots — is
+# the same machinery a built-in model gets.
+#
+# <details class="sbi-note">
+# <summary>▶️ <b>Which HSSM plots work for a registered custom model</b></summary>
+#
+# `plot_predictive` and `plot_quantile_probability` are data-driven: they need
+# the observed data and a posterior predictive, so they work for any registered
+# model with an `rv`. (The quantile probability plot additionally needs a
+# **condition column** to split on, which this flat single-θ dataset does not
+# have — see section 4 for it on the conditioned dataset.)
+#
+# `plot_model_cartoon` is the exception. It draws the latent trajectory by
+# calling `ssms.basic_simulators.simulator(model=model.model_name, …)`, passing
+# the *HSSM* model name straight through. Our name — `"ddm_nre"` — means nothing
+# to `ssm-simulators`, so the cartoon only works when you register under a name
+# that package already knows.
+#
+# </details>
 
-# %%
-fig, ax1 = plt.subplots(figsize=(6.5, 4))
-
-# defective RT densities, one thin line per replicate
-bins = np.linspace(0, 4, 50)
-ctr = 0.5 * (bins[:-1] + bins[1:])
-width = np.diff(bins)[0]
-for sign, colour, lbl in [(1, S.PRIMARY, "choice +1"), (-1, S.NAIVE, "choice -1")]:
-    for rep in pp[:60]:
-        m = rep[:, 1] == sign
-        # normalise by ALL trials, not just this choice's, so the two curves
-        # keep their relative mass -- that is what makes it a *defective*
-        # density, showing choice proportion and RT at once.
-        h, _ = np.histogram(rep[m, 0], bins=bins)
-        ax1.plot(ctr, h / (len(rep) * width), color=colour, alpha=0.12, lw=0.8)
-    m = sim_data.response.to_numpy() == sign
-    h, _ = np.histogram(sim_data.rt.to_numpy()[m], bins=bins)
-    ax1.plot(ctr, h / (len(sim_data) * width), color=colour, lw=2.5,
-             label=f"{lbl} (data)")
-ax1.set(xlabel="rt (s)", ylabel="defective density",
-        title="Predictive RT distributions\n(thin = one posterior draw)")
-ax1.legend(fontsize=8)
-fig.tight_layout()
+# %% [markdown]
+# <details class="sbi-tip">
+# <summary>💡 <b>When you need a portable artifact instead</b></summary>
+#
+# The route above hands HSSM a **JAX callable**, which needs nothing installed
+# beyond what we already have — but it also means the likelihood only exists
+# inside this Python session.
+#
+# For an artifact you can ship, `lanfactory.onnx.transform_bayesflow_to_onnx`
+# exports a trained approximator to ONNX, and HSSM then takes the file path
+# directly: `hssm.HSSM(..., loglik="my_net.onnx",
+# loglik_kind="approx_differentiable")`. It has real constraints — export needs
+# `KERAS_BACKEND="torch"`, and the network must use an identity adapter — so see
+# HSSM's `bayesflow_nle_onnx_integration.ipynb` tutorial before reaching for it.
+#
+# </details>
 
 # %% [markdown]
 # ### Quick reference

@@ -28,12 +28,12 @@ title: "Schedule"
 - 09:00 Opening remarks by organizers
 - 09:15 Lightning talk introductions by participants (1–2 min each)
 - 10:45 Morning coffee / tea
-- 11:00 **Cognitive modeling** (Pan) — Reading: Wilson & Collins (2019)
+- 11:00 **Cognitive modeling** (Pan) — Reading: Wilson & Collins (2019) · [slides](tutorials/day1_inference/cognitive_modeling_intro_shared.pdf)
 - 12:00 **Bayesian inference** (Turner) — Reading: Rouder & Province (2019)
 - 13:00 Lunch
-- 14:00 **Machine learning** (Kvam) — Reading: Kvam et al. (2024)
+- 14:00 **Machine learning** (Kvam) — Reading: Kvam et al. (2024) · [slides](tutorials/day1_inference/Intro to machine learning.pdf)
 - 14:30 **Simulation-based inference** (Radev) — Reading: Cranmer et al. (2020)
-- 15:30 **Latent variable modeling** (Sokratous) — Reading: Khemakhem et al. (2020)
+- 15:30 **Latent variable modeling** (Sokratous) — Reading: Khemakhem et al. (2020) [slides](tutorials/day1_inference/2026_SBI_LVM_KS.pdf)
 - 16:00 Formation of breakout groups (~5 participants per group, matched with an organizer by topic)
 
 ::: {.callout-note collapse="true"}
@@ -69,11 +69,11 @@ title: "Schedule"
 
 ## Day 3 — Wednesday, July 29: Tools for SBI
 
-- 09:00 **MATLAB Deep Learning Toolbox** (Kvam) — Reading: Kvam et al. (2025)
+- 09:00 **MATLAB Deep Learning Toolbox** (Kvam) — Reading: Kvam et al. (2025) · [slides](tutorials/day3_sbi_tools/Deep learning toolbox.pptx)
 - 09:30 **HSSM** (Fengler) — Reading: Xu et al. (2025) · [materials](tutorials/day3_sbi_tools/hssm-intro.ipynb)
 - 10:00 **BayesFlow** (Radev) — Reading: Kühmichel et al. (2025) · [materials](tutorials/day3_sbi_tools/dmc-bayesflow.ipynb)
 - 10:45 Morning coffee / tea
-- 11:00 **MCMC sampling for hierarchical Bayesian models** (Turner, Fengler) — Reading: Fengler et al. (2021) · [companion notebook](tutorials/day3_sbi_tools/hierarchical-binomial.ipynb) · [materials](tutorials/day3_sbi_tools/hierarchical-mcmc.ipynb)
+- 11:00 **MCMC sampling for hierarchical Bayesian models** (Turner, Fengler) — Reading: Fengler et al. (2021) · [companion notebook](tutorials/day3_sbi_tools/hierarchical-binomial.ipynb) · [slides](tutorials/day3_sbi_tools/SBI_summerschool_day3.pptx) [materials](tutorials/day3_sbi_tools/hierarchical-mcmc.ipynb)
 - 12:00 **Recurrent networks for dynamic data** (Pan) — Reading: Pan et al. (2025) · [materials](tutorials/day3_sbi_tools/lasenet_tutorial.ipynb)
 - 13:00 Lunch
 - 14:00 **Variational autoencoders** (Sokratous) — Reading: Doersch (2016)
@@ -92,13 +92,13 @@ title: "Schedule"
 ## Day 4 — Thursday, July 30: Complex models and joint modeling
 
 - 09:00 **Introduction to joint modeling** (Turner & Nunez) — Reading: Palestro et al. (2018)
-- 09:30 **Joint modeling with EEG** (Nunez) — Reading: Nunez et al. (2024)
+- 09:30 **Joint modeling with EEG** (Nunez) — Reading: Nunez et al. (2024) · [slides](tutorials/day4_complex_joint/SBI2026_Joint_Modeling_EEG_Nunez.pdf)
 - 10:00 **Joint modeling with fMRI** (Turner) — Reading: Turner et al. (2015)
 - 10:30 Morning coffee / tea
 - 10:45 **Exploratory modeling with moderational learning** (Zhao) — Reading: Zhao et al. (2025)
 - 12:00 **Advanced modeling with diffusion methods** (Radev) — Reading: Arruda et al. (2025)
 - 13:00 Lunch
-- 14:00 Joint modeling workshop: **using a deep neural network to build in covariation** (Nunez) — Reading: Ghaderi-Kangavari et al. (2023) · [materials](tutorials/day4_complex_joint/demo_single_trial_integrative_joint_modeling.ipynb)
+- 14:00 Joint modeling workshop: **using a deep neural network to build in covariation** (Nunez) — Reading: Ghaderi-Kangavari et al. (2023) · [slides](tutorials/day4_complex_joint/SBI2026_Tutorial_Nunez.pdf) [materials](tutorials/day4_complex_joint/demo_single_trial_integrative_joint_modeling.ipynb)
 - 14:45 Breakout group meetings
 - 16:00 Panel discussion with organizers + keynote speakers: future of SBI, open problems, career advice
 

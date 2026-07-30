@@ -212,34 +212,6 @@ F.fig_pooling_error(pool)
 #
 # </details>
 
-# %% [markdown]
-# ### Did we not just add parameters?
-#
-# Counted naively, partial pooling is the **bigger** model — everything
-# no-pooling has, plus $\mu$ and $\tau$ — and it generalised better. Either
-# Occam's razor is wrong or we are counting the wrong thing.
-#
-# <details class="sbi-note" open>
-# <summary>📝 <b>What <code>p_loo</code> measures</b></summary>
-#
-# How many parameters the model is effectively using — *measured*, not counted:
-#
-# $$
-# p_{\text{loo}} \;=\; (\text{fit to the data you have}) \;-\;
-#                      (\text{predicted fit to data you do not}),
-# $$
-#
-# with the second term estimated by leave-one-out cross-validation.
-#
-# A very flexible model fits what it saw much better than what it did not — a
-# **big gap**. A rigid model fits both about equally — a **small gap**. That gap
-# is the price of flexibility, denominated in parameters.
-#
-# On a simple model with flat priors it lands near the nominal count. Anything
-# that **constrains** parameters — a prior, or a hierarchy — pushes it below.
-#
-# </details>
-
 # %%
 print(f"{'':18s} {'nominal':>9s} {'effective (p_loo)':>19s}")
 for key, label in [("no_pooling", "no pooling"), ("partial_pooling", "partial pooling")]:
@@ -316,7 +288,7 @@ F.fig_funnel(x_prior, v_prior)
 #
 # **Centered** — sample $x$ directly, with its scale depending on $v$:
 #
-# $$v \sim \text{Normal}(0,3), \qquad x \sim \text{Normal}(0, e^{v/2})$$
+# $$v \sim \text{Normal}(0,3), \qquad x | v \sim \text{Normal}(0, e^{v/2})$$
 #
 # **Non-centered** — sample a standard normal and rescale it:
 #
@@ -376,28 +348,6 @@ for ax, (name, idata) in zip(axes, [("centered", idata_c), ("non-centered", idat
     ax.legend(loc="upper right")
 axes[0].set_ylabel("$v$")
 fig.tight_layout()
-
-# %% [markdown]
-# The divergences **cluster in the neck** — the region the centered chain then
-# under-samples.
-#
-# > **Poll.** The centered run reports $\hat{R} = 1.00$ for `v`. What does that
-# > tell you?
-# >
-# > **A.** The chains converged; the divergences are a performance warning.
-# > **B.** Nothing useful — all four chains can fail in the same way.
-# > **C.** It means the model is correctly specified.
-# > **D.** It means we need more draws.
-#
-# <details>
-# <summary>Answer</summary>
-#
-# **B.** $\hat{R}$ compares chains to each other. If every chain stops at the
-# same place for the same geometric reason, they agree beautifully — about the
-# wrong answer. This is why divergences are a *separate* diagnostic and why
-# "$\hat{R}$ is fine" is not a clean bill of health.
-#
-# </details>
 
 # %% [markdown]
 # ### Proving it is bias
@@ -816,21 +766,17 @@ print("\nparticipants:", data["participant_id"].nunique(), " trials:", len(data)
 # ```
 
 # %%
-def build(noncentered):
-    return hssm.HSSM(
-        data=data,
-        model="ddm",
-        noncentered=noncentered,
-        include=[
-            {"name": "v", "formula": "v ~ 1 + (1|participant_id)"},
-            {"name": "a", "formula": "a ~ 1 + (1|participant_id)"},
-        ],
-        p_outlier=0.05,          # explicit: this is the default, not "off"
-        prior_settings="safe",
-    )
-
-
-mixed = build({"v": False, "a": True})
+mixed = hssm.HSSM(
+    data=data,
+    model="ddm",
+    noncentered={"v": False, "a": True},
+    include=[
+        {"name": "v", "formula": "v ~ 1 + (1|participant_id)"},
+        {"name": "a", "formula": "a ~ 1 + (1|participant_id)"},
+    ],
+    p_outlier=0.05,          # explicit: this is the default, not "off"
+    prior_settings="safe",
+)
 
 # The PyMC graph is materialised at construction — no `.build()` to call.
 participant_nodes = sorted(n for n in mixed.pymc_model.named_vars
@@ -899,7 +845,11 @@ for n in participant_nodes:
 #
 # ```python
 # for setting in [True, False]:
-#     m = build(setting)
+#     m = hssm.HSSM(
+#         data=data, model="ddm", noncentered=setting,
+#         include=[{"name": "v", "formula": "v ~ 1 + (1|participant_id)"}],
+#         p_outlier=0.05, prior_settings="safe",
+#     )
 #     offs = sorted(n for n in m.pymc_model.named_vars if n.endswith("_offset"))
 #     print(setting, "->", offs)
 # ```
@@ -909,105 +859,6 @@ for n in participant_nodes:
 # better choice for `v`. Parameters that are weakly constrained per participant,
 # or a group scale estimated from only 14 groups, are the ones that want
 # non-centering. This is the crossover from section 4, in a real model.
-#
-# </details>
-
-# %% [markdown]
-# ## 6. The capstone: a slope per participant
-#
-# Section 1 gave every participant their own *drift*. But drift usually
-# **varies within a participant** with some manipulation, so give every
-# participant a **slope** as well:
-#
-# $$v_{gi} \;=\; \beta^{(g)}_0 \;+\; \beta^{(g)}_1 \cdot \text{difficulty}_i,
-#   \qquad
-#   \beta^{(g)}_0, \beta^{(g)}_1 \sim \text{Normal}(\mu_\beta, \tau_\beta)$$
-#
-# Same brutal panel — trial counts from 5 to 600 — and difficulty varies
-# continuously from trial to trial.
-#
-# A slope is *harder* than an intercept. It needs enough trials **and** enough
-# spread in the covariate. With five trials you have neither.
-
-# %%
-reg = F.regression_experiment(seed=RANDOM_SEED)
-
-for name in ("intercept", "slope"):
-    s = F.pooling_summary(reg[name])
-    print(f"{name:10s} MAE  n<30: {s['no_pooling']['mae_low']:.3f} -> "
-          f"{s['partial_pooling']['mae_low']:.3f}"
-          f"   |  n>=30: {s['no_pooling']['mae_high']:.3f} -> "
-          f"{s['partial_pooling']['mae_high']:.3f}"
-          f"   |  {s['low_n_improvement_pct']:.0f}% better where thin")
-
-# %%
-# Both quantities, stacked on a shared x-axis: read straight down and you are
-# looking at the same participant twice.
-fig, axes = plt.subplots(2, 1, figsize=(7.6, 8.2), sharex=True)
-F.fig_shrinkage(reg["intercept"], ax=axes[0],
-                ylabel=r"estimated intercept $\beta_0$",
-                title=r"Intercept $\beta_0$ — drift at average difficulty")
-F.fig_shrinkage(reg["slope"], ax=axes[1], legend=False,
-                ylabel=r"estimated slope $\beta_1$",
-                title=r"Difficulty slope $\beta_1$ — how drift responds")
-axes[0].set_xlabel("")
-fig.tight_layout()
-
-# %% [markdown]
-# Look at the left-hand side of each panel. Neither quantity survives five
-# trials: the worst intercept lands at **−0.4** where the truth is 0.67, and the
-# worst slope at **2.9** where the truth is 1.23, with another at essentially
-# **zero** where the truth is 1.06. Those are not estimates, they are noise with
-# a credible interval attached.
-#
-# The slope is the worse of the two — MAE **0.60** against the intercept's
-# **0.35** where trials are thin — and it is the one pooling rescues hardest.
-# On the right-hand side both panels agree: participants who spoke for
-# themselves are left alone.
-#
-# <details class="sbi-note">
-# <summary>📝 <b>Why the slope gains more than the intercept</b></summary>
-#
-# The improvement where trials are thin is around **48%** for the intercept and
-# around **62%** for the slope — the numbers behind the two panels above. The
-# slope gains more because it needs the covariate to have moved *within* that
-# participant.
-#
-# This is the practical argument for hierarchy in cognitive modelling. It is
-# rarely "we want a population estimate". It is "we want per-participant
-# estimates, and some of our participants are thin."
-#
-# </details>
-#
-# <details class="sbi-warn" open>
-# <summary>⚠️ <b>What pooling is not</b></summary>
-#
-# It does not manufacture information. The rescued slopes are **closer** to the
-# truth, not correct — look at how far the five-trial participants still sit
-# from their black crosses. Pooling buys you a defensible estimate where you
-# would otherwise have had a wild one; it does not buy you the experiment you
-# failed to run.
-#
-# </details>
-#
-# ### Exercise
-#
-# The panel fixes `a`, `z` and `t` so the comparison is about `v` alone. Give
-# the boundary `a` a per-participant random effect too, and predict — before
-# running it — whether pooling helps `a` more or less than it helped the slope.
-#
-# <details>
-# <summary>What to expect, and why</summary>
-#
-# `a` is identified through the *speed–accuracy relationship* rather than
-# through trial count alone, so adding trials helps it more slowly than it helps
-# `v` — even the data-rich participants stay somewhat prior-dependent, and
-# pooling keeps earning its keep further to the right of the plot.
-#
-# Same point as section 5: **different parameters are informed by different
-# amounts of the same data.** If you find `a` still shrinking hard at 600
-# trials, that is your evidence that `a` wants a non-centered parameterization
-# while `v` does not.
 #
 # </details>
 
